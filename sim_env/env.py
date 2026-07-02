@@ -29,12 +29,14 @@ class EVChargingEnv:
         road_network: Optional[Any] = None,
         station_manager: Optional[Any] = None,
         vehicle_manager: Optional[Any] = None,
+        mobility_manager: Optional[Any] = None,
         demand_generator: Optional[Any] = None,
     ) -> None:
         self.config = config or EnvConfig()
         self.road_network = road_network
         self.station_manager = station_manager
         self.vehicle_manager = vehicle_manager
+        self.mobility_manager = mobility_manager
         self.demand_generator = demand_generator
 
         self.current_time = self.config.start_time
@@ -55,6 +57,7 @@ class EVChargingEnv:
         self._reset_component(self.road_network)
         self._reset_component(self.station_manager)
         self._reset_component(self.vehicle_manager)
+        self._reset_component(self.mobility_manager)
         self._reset_component(self.demand_generator)
 
         return self.get_observation()
@@ -76,9 +79,10 @@ class EVChargingEnv:
             return self.get_observation(), 0.0, True, self.get_info()
 
         self._update_component(self.demand_generator, action=action)
+        self._update_component(self.road_network, action=action)
+        self._update_component(self.mobility_manager, action=action)
         self._update_component(self.vehicle_manager, action=action)
         self._update_component(self.station_manager, action=action)
-        self._update_component(self.road_network, action=action)
 
         self.current_time += self.config.time_step
         self.step_count += 1
@@ -116,6 +120,7 @@ class EVChargingEnv:
             "road_network": self._get_component_state(self.road_network),
             "stations": self._get_component_state(self.station_manager),
             "vehicles": self._get_component_state(self.vehicle_manager),
+            "mobility": self._get_component_state(self.mobility_manager),
         }
 
     def compute_reward(self) -> float:
