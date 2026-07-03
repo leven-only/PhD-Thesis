@@ -58,8 +58,17 @@ class RoadNetwork:
         for edge in edges or []:
             self.add_edge(edge)
 
+    # 同步更新graph信息
+    def _sync_graph_edge(self, edge_id: str) -> None:
+        """将 RoadEdge 的动态属性同步到 networkx.Graph。"""
+        edge = self.edges[edge_id]
+        graph_edge = cast(dict[str, Any], self.graph[edge.node_u][edge.node_v])
+        graph_edge["speed_kph"] = edge.speed_kph
+        graph_edge["current_speed_kph"] = edge.current_speed_kph
+        graph_edge["travel_time_seconds"] = edge.travel_time_seconds
+
+    # 添加路网节点
     def add_node(self, node: RoadNode) -> None:
-        """添加路网节点。"""
         if node.node_id in self.nodes:
             raise ValueError(f"节点 ID 已存在: {node.node_id}")
 
@@ -70,8 +79,8 @@ class RoadNetwork:
             node=node,
         )
 
+    # 添加无向边
     def add_edge(self, edge: RoadEdge) -> None:
-        """添加无向边。"""
         if edge.edge_id in self.edges:
             raise ValueError(f"边 ID 已存在: {edge.edge_id}")
 
@@ -93,13 +102,14 @@ class RoadNetwork:
             edge=edge,
         )
 
+    # 重置路网状态。
     def reset(self) -> None:
-        """重置路网状态。
-
+        """
         当前版本不在路网内部保存初始速度备份。
         后续速度状态由外部交通数据导入并通过 update_speeds 更新。
         """
 
+    # 推进一个时间步
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
         """推进路网一个时间步。
 
@@ -108,8 +118,8 @@ class RoadNetwork:
         if isinstance(action, dict) and "edge_speeds_kph" in action:
             self.update_speeds(action["edge_speeds_kph"])
 
+    # 批量更新边的当前速度。
     def update_speeds(self, edge_speeds_kph: dict[str, float]) -> None:
-        """批量更新边的当前速度。"""
         for edge_id, speed_kph in edge_speeds_kph.items():
             if edge_id not in self.edges:
                 continue
@@ -117,8 +127,8 @@ class RoadNetwork:
             self.edges[edge_id].speed_kph = max(float(speed_kph), 0.0)
             self._sync_graph_edge(edge_id)
 
+    # 返回两个相邻节点之间的边。
     def get_edge_between(self, node_u: str, node_v: str) -> RoadEdge:
-        """返回两个相邻节点之间的边。"""
         edge_data = self.graph.get_edge_data(node_u, node_v)
 
         if edge_data is None:
@@ -127,46 +137,18 @@ class RoadNetwork:
         edge_id = edge_data["edge_id"]
         return self.edges[edge_id]
 
+    # 返回节点的相邻节点。
     def get_neighbors(self, node_id: str) -> list[str]:
-        """返回节点的相邻节点。"""
         if node_id not in self.graph:
             return []
 
         return list(self.graph.neighbors(node_id))
 
+    # 返回当前路网图的副本，避免外部直接修改内部图。
     def get_graph(self) -> nx.Graph:
-        """返回当前路网图的副本，避免外部直接修改内部图。"""
         return self.graph.copy()
 
-    def shortest_path(self, origin_node_id: str, destination_node_id: str, weight: str = "time") -> list[str]:
-        """计算最短路径。
-
-        Parameters
-        ----------
-        weight:
-            "time" 表示按当前通行时间最短，"distance" 表示按距离最短。
-        """
-        if origin_node_id not in self.nodes:
-            raise ValueError(f"起点不存在: {origin_node_id}")
-
-        if destination_node_id not in self.nodes:
-            raise ValueError(f"终点不存在: {destination_node_id}")
-
-        if weight not in ("time", "distance"):
-            raise ValueError(f"不支持的路径权重: {weight}")
-
-        graph_weight = "length_km" if weight == "distance" else "travel_time_seconds"
-
-        try:
-            return nx.shortest_path(
-                self.graph,
-                source=origin_node_id,
-                target=destination_node_id,
-                weight=graph_weight,
-            )
-        except nx.NetworkXNoPath as exc:
-            raise ValueError(f"无法从 {origin_node_id} 到达 {destination_node_id}")
-
+    # 获取路段距离
     def path_distance_km(self, path: list[str]) -> float:
         """计算路径总距离。"""
         return sum(
@@ -174,15 +156,15 @@ class RoadNetwork:
             for i in range(len(path) - 1)
         )
 
+    # 计算路径当前通行时间。
     def path_travel_time_seconds(self, path: list[str]) -> float:
-        """计算路径当前通行时间。"""
         return sum(
             self.get_edge_between(path[i], path[i + 1]).travel_time_seconds
             for i in range(len(path) - 1)
         )
 
+    # 返回路网状态。
     def get_state(self) -> dict[str, Any]:
-        """返回路网状态。"""
         return {
             "node_count": len(self.nodes),
             "edge_count": len(self.edges),
@@ -205,14 +187,30 @@ class RoadNetwork:
             },
         }
 
-    def _sync_graph_edge(self, edge_id: str) -> None:
-        """将 RoadEdge 的动态属性同步到 networkx.Graph。"""
-        edge = self.edges[edge_id]
-        graph_edge = cast(dict[str, Any], self.graph[edge.node_u][edge.node_v])
-        graph_edge["speed_kph"] = edge.speed_kph
-        graph_edge["current_speed_kph"] = edge.current_speed_kph
-        graph_edge["travel_time_seconds"] = edge.travel_time_seconds
+    # 计算最短路径。
+    def shortest_path(self, origin_node_id: str, destination_node_id: str, weight: str = "time") -> list[str]:
+        if origin_node_id not in self.nodes:
+            raise ValueError(f"起点不存在: {origin_node_id}")
 
+        if destination_node_id not in self.nodes:
+            raise ValueError(f"终点不存在: {destination_node_id}")
+
+        if weight not in ("time", "distance"):
+            raise ValueError(f"不支持的路径权重: {weight}")
+
+        graph_weight = "length_km" if weight == "distance" else "travel_time_seconds"
+
+        try:
+            return nx.shortest_path(
+                self.graph,
+                source=origin_node_id,
+                target=destination_node_id,
+                weight=graph_weight,
+            )
+        except nx.NetworkXNoPath as exc:
+            raise ValueError(f"无法从 {origin_node_id} 到达 {destination_node_id}")
+
+    # 构建默认路网
     def _build_default_network(self) -> tuple[list[RoadNode], list[RoadEdge]]:
         """创建一个 10 节点的默认测试路网。"""
         nodes = [

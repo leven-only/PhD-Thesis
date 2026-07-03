@@ -21,35 +21,26 @@ class MobilityManager:
     """车辆移动执行器。
 
     该类只负责执行路径，不负责决定路径为什么这样选。
-    路径可以由外部算法传入；测试阶段也可以启用最短路径 baseline。
+    路径必须由外部算法或调用方传入。
     """
 
     def __init__(
         self,
         road_network: RoadNetwork,
         vehicle_manager: VehicleManager,
-        auto_plan_shortest_path: bool = True,
-        path_weight: str = "time",
     ) -> None:
-        self.road_network = road_network
-        self.vehicle_manager = vehicle_manager
-        self.auto_plan_shortest_path = auto_plan_shortest_path
-        self.path_weight = path_weight
+        self.road_network = road_network    # 路网对象
+        self.vehicle_manager = vehicle_manager  # 汽车对象管理
         self.active_plans: dict[str, MobilityPlan] = {}
 
     def reset(self) -> None:
-        """清空当前路径计划，并按需生成默认最短路径计划。"""
+        """清空当前路径计划。"""
         self.active_plans = {}
-
-        if self.auto_plan_shortest_path:
-            self.plan_all_shortest_paths()
 
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
         """推进所有正在执行路径的车辆。"""
         self._apply_action(action)
-
-        if self.auto_plan_shortest_path:
-            self.plan_missing_shortest_paths()
+        self._ensure_active_plans()
 
         for vehicle_id in list(self.active_plans.keys()):
             self._move_vehicle(vehicle_id, time_step)
@@ -76,33 +67,6 @@ class MobilityManager:
             path=list(path),
         )
         vehicle.set_status(VehicleStatus.DRIVING)
-
-    def plan_shortest_path_for_vehicle(self, vehicle_id: str) -> None:
-        """给单辆车生成到目的地的当前最短路径。"""
-        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
-
-        if vehicle.current_node_id is None:
-            raise ValueError(f"车辆当前位置为空: {vehicle_id}")
-
-        path = self.road_network.shortest_path(
-            vehicle.current_node_id,
-            vehicle.destination_node_id,
-            weight=self.path_weight,
-        )
-        self.set_path(vehicle_id, path)
-
-    def plan_all_shortest_paths(self) -> None:
-        """给所有未完成车辆生成最短路径。"""
-        for vehicle_id in self.vehicle_manager.vehicles:
-            self._try_plan_shortest_path(vehicle_id)
-
-    def plan_missing_shortest_paths(self) -> None:
-        """给没有路径计划的可行驶车辆补充最短路径。"""
-        for vehicle_id in self.vehicle_manager.vehicles:
-            if vehicle_id in self.active_plans:
-                continue
-
-            self._try_plan_shortest_path(vehicle_id)
 
     def get_state(self) -> dict[str, Any]:
         """返回移动执行层状态。"""
@@ -131,22 +95,23 @@ class MobilityManager:
         for vehicle_id, path in paths.items():
             self.set_path(vehicle_id, path)
 
-    def _try_plan_shortest_path(self, vehicle_id: str) -> None:
-        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
+    def _ensure_active_plans(self) -> None:
+        """确保所有可行驶车辆都有路径计划。"""
+        for vehicle_id, vehicle in self.vehicle_manager.vehicles.items():
+            if vehicle.status in (
+                VehicleStatus.FINISHED,
+                VehicleStatus.FAILED,
+                VehicleStatus.CHARGING,
+                VehicleStatus.QUEUEING,
+            ):
+                continue
 
-        if vehicle.status in (
-            VehicleStatus.FINISHED,
-            VehicleStatus.FAILED,
-            VehicleStatus.CHARGING,
-            VehicleStatus.QUEUEING,
-        ):
-            return
+            if vehicle.current_node_id == vehicle.destination_node_id:
+                vehicle.mark_finished()
+                continue
 
-        if vehicle.current_node_id == vehicle.destination_node_id:
-            vehicle.mark_finished()
-            return
-
-        self.plan_shortest_path_for_vehicle(vehicle_id)
+            if vehicle_id not in self.active_plans:
+                raise ValueError(f"车辆缺少路径计划: {vehicle_id}")
 
     def _move_vehicle(self, vehicle_id: str, time_step: float) -> None:
         vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
