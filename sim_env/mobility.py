@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from sim_env.road_network import RoadNetwork
-from sim_env.vehicle import Vehicle, VehicleManager, VehicleStatus
+from sim_env.vehicle import VehicleManager, VehicleStatus
 
 
 @dataclass
@@ -58,7 +58,7 @@ class MobilityManager:
             )
 
         if len(path) == 1:
-            vehicle.mark_finished()
+            vehicle.update_state(status=VehicleStatus.FINISHED)
             self.active_plans.pop(vehicle_id, None)
             return
 
@@ -66,7 +66,7 @@ class MobilityManager:
             vehicle_id=vehicle_id,
             path=list(path),
         )
-        vehicle.set_status(VehicleStatus.DRIVING)
+        vehicle.update_state(status=VehicleStatus.DRIVING)
 
     def get_state(self) -> dict[str, Any]:
         """返回移动执行层状态。"""
@@ -98,16 +98,11 @@ class MobilityManager:
     def _ensure_active_plans(self) -> None:
         """确保所有可行驶车辆都有路径计划。"""
         for vehicle_id, vehicle in self.vehicle_manager.vehicles.items():
-            if vehicle.status in (
-                VehicleStatus.FINISHED,
-                VehicleStatus.FAILED,
-                VehicleStatus.CHARGING,
-                VehicleStatus.QUEUEING,
-            ):
+            if not vehicle.can_move():
                 continue
 
             if vehicle.current_node_id == vehicle.destination_node_id:
-                vehicle.mark_finished()
+                vehicle.update_state(status=VehicleStatus.FINISHED)
                 continue
 
             if vehicle_id not in self.active_plans:
@@ -118,10 +113,11 @@ class MobilityManager:
         plan = self.active_plans[vehicle_id]
 
         remaining_time = max(time_step, 0.0)
+        remaining_energy_distance = vehicle.available_distance_km()
 
-        while remaining_time > 0 and vehicle.status == VehicleStatus.DRIVING:
+        while remaining_time > 0 and vehicle.can_move():
             if plan.next_node_index >= len(plan.path):
-                vehicle.mark_finished()
+                vehicle.update_state(status=VehicleStatus.FINISHED)
                 self.active_plans.pop(vehicle_id, None)
                 return
 
@@ -134,41 +130,48 @@ class MobilityManager:
 
             speed_km_per_second = edge.current_speed_kph / 3600
             distance_by_time = speed_km_per_second * remaining_time
-            distance_by_energy = self._available_distance_km(vehicle)
             travel_distance = min(
                 plan.current_edge_remaining_km,
                 distance_by_time,
-                distance_by_energy,
+                remaining_energy_distance,
             )
 
             if travel_distance <= 0:
-                vehicle.set_status(VehicleStatus.FAILED)
+                vehicle.update_state(status=VehicleStatus.FAILED)
                 self.active_plans.pop(vehicle_id, None)
                 return
 
             travel_time = travel_distance / speed_km_per_second
-            vehicle.record_travel(travel_distance, travel_time)
+            self._update_vehicle_travel(vehicle, travel_distance, travel_time)
             remaining_time -= travel_time
+            remaining_energy_distance -= travel_distance
             plan.current_edge_remaining_km -= travel_distance
 
-            if vehicle.status == VehicleStatus.FAILED:
+            if vehicle.is_failed():
                 self.active_plans.pop(vehicle_id, None)
                 return
 
             if plan.current_edge_remaining_km > 1e-9:
                 return
 
-            vehicle.move_to_node(next_node)
+            vehicle.update_state(current_node_id=next_node)
             plan.next_node_index += 1
             plan.current_edge_remaining_km = None
 
         if vehicle.current_node_id == vehicle.destination_node_id:
-            vehicle.mark_finished()
+            vehicle.update_state(status=VehicleStatus.FINISHED)
             self.active_plans.pop(vehicle_id, None)
 
-    def _available_distance_km(self, vehicle: Vehicle) -> float:
-        if vehicle.energy_consumption_kwh_per_km <= 0:
-            return float("inf")
+    def _update_vehicle_travel(self, vehicle, travel_distance: float, travel_time: float) -> None:
+        energy_used = max(travel_distance, 0.0) * vehicle.energy_consumption_kwh_per_km
+        soc_drop = energy_used / vehicle.battery_capacity_kwh
+        new_soc = max(0.0, vehicle.soc - soc_drop)
+        new_status = VehicleStatus.FAILED if new_soc <= 0.0 else vehicle.status
 
-        available_energy_kwh = vehicle.soc * vehicle.battery_capacity_kwh
-        return available_energy_kwh / vehicle.energy_consumption_kwh_per_km
+        vehicle.update_state(
+            soc=new_soc,
+            status=new_status,
+            total_distance_km=vehicle.total_distance_km + max(travel_distance, 0.0),
+            total_energy_used_kwh=vehicle.total_energy_used_kwh + energy_used,
+            total_travel_time=vehicle.total_travel_time + max(travel_time, 0.0),
+        )

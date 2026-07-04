@@ -30,7 +30,6 @@ class Vehicle:
     energy_consumption_kwh_per_km: float = 0.18  # 能耗率，后期替换为真实的能耗模型
 
     """汽车实时信息"""
-
     current_node_id: Optional[str] = None  # 当前位置
     soc: float = 1.0  # 当前SOC
     status: VehicleStatus = VehicleStatus.IDLE  # 当前状态
@@ -48,6 +47,13 @@ class Vehicle:
         self.initial_node_id = self.current_node_id
         self.initial_total_cost = self.total_cost
 
+    # 私有状态更新函数
+    def _update_internal_status(self) -> None:
+        """根据车辆自身状态做内部状态检查。"""
+        if self.needs_charge() and self.status == VehicleStatus.DRIVING:
+            self.status = VehicleStatus.SEEKING_CHARGE
+
+    # 环境生命周期接口
     def reset(self) -> None:
         """将车辆恢复到初始状态。"""
         self.current_node_id = self.initial_node_id
@@ -59,72 +65,8 @@ class Vehicle:
         self.total_cost = self.initial_total_cost
 
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
-        """推进车辆一个时间步。
-
-        车辆模型只维护车辆自身状态，不在这里选择路线或充电站。
-        路线规划和站点选择应由算法或环境执行层完成。
-        """
-        if self.needs_charge() and self.status == VehicleStatus.DRIVING:
-            self.status = VehicleStatus.SEEKING_CHARGE
-
-    def consume_energy(self, distance_km: float) -> float:
-        """根据行驶距离扣减电量，并返回本次消耗的电量。"""
-        energy_used = distance_km * self.energy_consumption_kwh_per_km
-        soc_drop = energy_used / self.battery_capacity_kwh
-
-        self.soc = max(0.0, self.soc - soc_drop)
-        self.total_distance_km += distance_km
-        self.total_energy_used_kwh += energy_used
-
-        if self.soc <= 0.0:
-            self.status = VehicleStatus.FAILED
-
-        return energy_used
-
-    def record_travel(self, distance_km: float, travel_time: float) -> float:
-        """记录一次行驶过程，并同步扣减对应能耗。"""
-        self.total_travel_time += max(travel_time, 0.0)
-        return self.consume_energy(distance_km)
-
-    def move_to_node(self, node_id: str) -> None:
-        """更新车辆当前位置。"""
-        self.current_node_id = node_id
-
-    def charge(self, energy_kwh: float) -> float:
-        """给车辆充电，并返回实际充入的电量。"""
-        available_capacity = (1.0 - self.soc) * self.battery_capacity_kwh
-        charged_energy = min(max(energy_kwh, 0.0), available_capacity)
-
-        self.soc += charged_energy / self.battery_capacity_kwh
-
-        if self.soc >= self.target_soc and self.status == VehicleStatus.CHARGING:
-            self.status = VehicleStatus.DRIVING
-
-        return charged_energy
-
-    def needs_charge(self) -> bool:
-        """判断车辆是否需要充电。"""
-        return self.soc <= self.low_soc_threshold
-
-    def add_cost(self, cost: float) -> None:
-        """增加车辆累计费用。"""
-        self.total_cost += max(cost, 0.0)
-
-    def set_status(self, status: VehicleStatus) -> None:
-        """更新车辆当前状态。"""
-        self.status = status
-
-    def mark_queueing(self) -> None:
-        """标记车辆正在充电站排队。"""
-        self.status = VehicleStatus.QUEUEING
-
-    def mark_charging(self) -> None:
-        """标记车辆正在充电。"""
-        self.status = VehicleStatus.CHARGING
-
-    def mark_finished(self) -> None:
-        """标记车辆已经完成出行。"""
-        self.status = VehicleStatus.FINISHED
+        """推进车辆一个时间步。"""
+        self._update_internal_status()
 
     def get_state(self) -> dict[str, Any]:
         """返回车辆当前状态。"""
@@ -141,40 +83,80 @@ class Vehicle:
             "total_cost": self.total_cost,
         }
 
+    # 状态查询
+    def needs_charge(self) -> bool:
+        """判断车辆是否需要充电。"""
+        return self.soc <= self.low_soc_threshold
 
+    def available_distance_km(self) -> float:
+        """根据当前电量返回车辆理论可行驶距离。"""
+        if self.energy_consumption_kwh_per_km <= 0:
+            return float("inf")
+
+        available_energy_kwh = self.soc * self.battery_capacity_kwh
+        return available_energy_kwh / self.energy_consumption_kwh_per_km
+
+    def can_move(self) -> bool:
+        """判断车辆当前是否可以行驶。"""
+        return self.status not in (
+            VehicleStatus.FINISHED,
+            VehicleStatus.FAILED,
+            VehicleStatus.CHARGING,
+            VehicleStatus.QUEUEING,
+        )
+
+    def is_driving(self) -> bool:
+        """判断车辆是否处于行驶状态。"""
+        return self.status == VehicleStatus.DRIVING
+
+    def is_finished(self) -> bool:
+        """判断车辆是否已经完成出行。"""
+        return self.status == VehicleStatus.FINISHED
+
+    def is_failed(self) -> bool:
+        """判断车辆是否已经失败。"""
+        return self.status == VehicleStatus.FAILED
+
+    # 状态统一更新
+    def update_state(self, **updates: Any) -> None:
+        """统一更新车辆状态；当前只做字段存在性检查，后续可补充特殊约束。"""
+        for field_name, value in updates.items():
+            if not hasattr(self, field_name):
+                raise AttributeError(f"车辆不存在状态字段: {field_name}")
+
+            setattr(self, field_name, value)
+
+# 车辆管理器，用于统一管理车辆集合并提供 env 调用接口。
 class VehicleManager:
-    """车辆管理器，用于统一管理车辆集合并提供 env 调用接口。"""
-
     def __init__(self, vehicles: Optional[list[Vehicle]] = None) -> None:
-        self.vehicles: dict[str, Vehicle] = {}
-
-        if vehicles:
+        self.vehicles: dict[str, Vehicle] = {}  # 汽车对象
+        if vehicles:    # 初始化汽车对象
             for vehicle in vehicles:
                 self.add_vehicle(vehicle)
 
+    # 添加一辆车。
     def add_vehicle(self, vehicle: Vehicle) -> None:
-        """添加一辆车。"""
         if vehicle.vehicle_id in self.vehicles:
             raise ValueError(f"车辆 ID 已存在: {vehicle.vehicle_id}")
 
         self.vehicles[vehicle.vehicle_id] = vehicle
 
+    # 根据 ID 获取车辆。
     def get_vehicle(self, vehicle_id: str) -> Vehicle:
-        """根据 ID 获取车辆。"""
         return self.vehicles[vehicle_id]
 
+    # 重置所有车辆。
     def reset(self) -> None:
-        """重置所有车辆。"""
         for vehicle in self.vehicles.values():
             vehicle.reset()
 
+    # 推进所有车辆一个时间步。
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
-        """推进所有车辆一个时间步。"""
         for vehicle in self.vehicles.values():
             vehicle.step(time_step, current_time, action)
 
+    # 返回车辆集合状态。
     def get_state(self) -> dict[str, Any]:
-        """返回车辆集合状态。"""
         status_counts: dict[str, int] = {}
 
         for vehicle in self.vehicles.values():
