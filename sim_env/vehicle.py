@@ -157,6 +157,25 @@ class Vehicle:
 
         self.update_state(**updates)
 
+    def apply_charging_result(
+        self,
+        energy_kwh: float,
+        cost: float,
+        status: Optional[VehicleStatus] = None,
+    ) -> None:
+        """根据一次充电结果，统一更新车辆状态。"""
+        safe_energy = max(energy_kwh, 0.0)
+        safe_cost = max(cost, 0.0)
+        soc_gain = safe_energy / self.battery_capacity_kwh
+        new_soc = min(1.0, self.soc + soc_gain)
+        new_status = status if status is not None else self.status
+
+        self.update_state(
+            soc=new_soc,
+            status=new_status,
+            total_cost=self.total_cost + safe_cost,
+        )
+
 # 车辆管理器，用于统一管理车辆集合并提供 env 调用接口。
 class VehicleManager:
     def __init__(self, vehicles: Optional[list[Vehicle]] = None) -> None:

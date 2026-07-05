@@ -1,52 +1,17 @@
 """模拟环境启动入口。"""
 
-from sim_env.env import EVChargingEnv, EnvConfig
-from sim_env.mobility import MobilityManager
-from sim_env.road_network import RoadNetwork
-from sim_env.vehicle import Vehicle, VehicleManager
+from sim_env.example_env.builder import build_default_env
 
 
 def main():
-    # 环境配置【后期将配置移动到专用配置文件】
-    config = EnvConfig(
-        start_time=0,
-        end_time=3600,
-        time_step=60,
-    )
-
-    # 建立路网对象
-    road_network = RoadNetwork()
-
-    # 建立汽车对象
-    vehicle_manager = VehicleManager(
-        vehicles=[
-            Vehicle(
-                vehicle_id="vehicle_001",   # 编号
-                origin_node_id="node_01",   # 起点
-                destination_node_id="node_10",  # 终点
-            )
-        ]
-    )
-
-    # 建立移动管理，负责汽车的移动
-    mobility_manager = MobilityManager(
-        road_network=road_network,  # 上传路网
-        vehicle_manager=vehicle_manager,    # 将 汽车对象 交给 移动管理对象
-    )
-
-    # 建立 环境对象
-    env = EVChargingEnv(
-        config=config,  # 上传配置
-        road_network=road_network,  # 上传路网
-        vehicle_manager=vehicle_manager,    # 上传 汽车管理
-        mobility_manager=mobility_manager,  # 上传 移动管理
-    )
+    # 创建默认示例环境和组件引用。
+    env, context = build_default_env()
 
     observation = env.reset()   # 重置环境，并 返回初始状态
     print_vehicle_state("初始状态", observation)
 
     # 由 road network提供最短路径
-    initial_path = road_network.shortest_path(
+    initial_path = context.road_network.shortest_path(
         "node_01",
         "node_10",
         weight="time",
@@ -74,6 +39,7 @@ def main():
 def print_vehicle_state(label, observation):
     vehicle_state = observation["vehicles"]["vehicles"]["vehicle_001"]
     mobility_state = observation["mobility"]
+    station_state = observation["stations"]
 
     # 这个函数需要更智能，不需要显示打印参数
     print(
@@ -86,6 +52,7 @@ def print_vehicle_state(label, observation):
             "distance_km": round(vehicle_state["total_distance_km"], 4),
             "travel_time": round(vehicle_state["total_travel_time"], 2),
             "active_plan_count": mobility_state["active_plan_count"],
+            "station_count": station_state["station_count"],
         },
     )
 
