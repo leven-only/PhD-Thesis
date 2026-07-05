@@ -109,7 +109,7 @@ class RoadNetwork:
         后续速度状态由外部交通数据导入并通过 update_speeds 更新。
         """
 
-    # 推进一个时间步
+    # 推进一个时间步，更新路网信息
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
         """推进路网一个时间步。
 

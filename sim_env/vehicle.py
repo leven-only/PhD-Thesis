@@ -96,8 +96,8 @@ class Vehicle:
         available_energy_kwh = self.soc * self.battery_capacity_kwh
         return available_energy_kwh / self.energy_consumption_kwh_per_km
 
+    # 判断车辆当前是否可以行驶。可以移动返回true，否则返回false。
     def can_move(self) -> bool:
-        """判断车辆当前是否可以行驶。"""
         return self.status not in (
             VehicleStatus.FINISHED,
             VehicleStatus.FAILED,
@@ -125,6 +125,37 @@ class Vehicle:
                 raise AttributeError(f"车辆不存在状态字段: {field_name}")
 
             setattr(self, field_name, value)
+
+    def apply_movement_result(
+        self,
+        distance_km: float,
+        travel_time: float,
+        current_node_id: Optional[str] = None,
+        status: Optional[VehicleStatus] = None,
+    ) -> None:
+        """根据一次移动结果，统一更新车辆状态。"""
+        safe_distance = max(distance_km, 0.0)
+        safe_travel_time = max(travel_time, 0.0)
+        energy_used = safe_distance * self.energy_consumption_kwh_per_km
+        soc_drop = energy_used / self.battery_capacity_kwh
+        new_soc = max(0.0, self.soc - soc_drop)
+        new_status = status if status is not None else self.status
+
+        if new_soc <= 0.0:
+            new_status = VehicleStatus.FAILED
+
+        updates: dict[str, Any] = {
+            "soc": new_soc,
+            "status": new_status,
+            "total_distance_km": self.total_distance_km + safe_distance,
+            "total_energy_used_kwh": self.total_energy_used_kwh + energy_used,
+            "total_travel_time": self.total_travel_time + safe_travel_time,
+        }
+
+        if current_node_id is not None:
+            updates["current_node_id"] = current_node_id
+
+        self.update_state(**updates)
 
 # 车辆管理器，用于统一管理车辆集合并提供 env 调用接口。
 class VehicleManager:

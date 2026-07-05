@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from sim_env.road_network import RoadNetwork
-from sim_env.vehicle import VehicleManager, VehicleStatus
+from sim_env.vehicle import Vehicle, VehicleManager, VehicleStatus
 
 
 @dataclass
@@ -15,6 +15,17 @@ class MobilityPlan:
     path: list[str]
     next_node_index: int = 1
     current_edge_remaining_km: Optional[float] = None
+
+
+@dataclass
+class MovementResult:
+    """单辆车在一个时间步内的移动结果。"""
+
+    distance_km: float = 0.0
+    travel_time: float = 0.0
+    reached_node_id: Optional[str] = None
+    status: Optional[VehicleStatus] = None
+    remove_plan: bool = False
 
 
 class MobilityManager:
@@ -31,23 +42,23 @@ class MobilityManager:
     ) -> None:
         self.road_network = road_network    # 路网对象
         self.vehicle_manager = vehicle_manager  # 汽车对象管理
-        self.active_plans: dict[str, MobilityPlan] = {}
+        self.active_plans: dict[str, MobilityPlan] = {} # 当前所有汽车的移动计划，key为汽车id，value为移动计划对象
 
+    # 清空当前路径计划。
     def reset(self) -> None:
-        """清空当前路径计划。"""
         self.active_plans = {}
 
+    # 推进所有正在执行路径的车辆。
     def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
-        """推进所有正在执行路径的车辆。"""
-        self._apply_action(action)
+        self._apply_action(action)  # 给每个汽车
         self._ensure_active_plans()
 
         for vehicle_id in list(self.active_plans.keys()):
             self._move_vehicle(vehicle_id, time_step)
 
-    def set_path(self, vehicle_id: str, path: list[str]) -> None:
-        """给车辆设置一条待执行路径。"""
-        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
+    # 给车辆设置一条待执行路径，建立移动计划对象。
+    def _set_path(self, vehicle_id: str, path: list[str]) -> None:
+        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)  # 获取 vehicle 对象
 
         if not path:
             raise ValueError("路径不能为空")
@@ -57,19 +68,21 @@ class MobilityManager:
                 f"路径起点 {path[0]} 与车辆当前位置 {vehicle.current_node_id} 不一致"
             )
 
-        if len(path) == 1:
+        if len(path) == 1:  # 路段节点即汽车终点
             vehicle.update_state(status=VehicleStatus.FINISHED)
             self.active_plans.pop(vehicle_id, None)
             return
 
+        # 建立移动对象
         self.active_plans[vehicle_id] = MobilityPlan(
             vehicle_id=vehicle_id,
             path=list(path),
         )
+
         vehicle.update_state(status=VehicleStatus.DRIVING)
 
+    # 返回移动执行层状态
     def get_state(self) -> dict[str, Any]:
-        """返回移动执行层状态。"""
         return {
             "active_plan_count": len(self.active_plans),
             "active_plans": {
@@ -82,8 +95,8 @@ class MobilityManager:
             },
         }
 
+    # 给每个汽车分配移动路径
     def _apply_action(self, action: Optional[Any]) -> None:
-        """应用外部算法传入的路径计划。"""
         if not isinstance(action, dict):
             return
 
@@ -92,35 +105,68 @@ class MobilityManager:
         if not isinstance(paths, dict):
             return
 
+        """
+        action = {
+            "vehicle_paths": {
+                "vehicle_001": ["node_01", "node_02", "node_06", "node_10"]
+            }
+        }
+        """
         for vehicle_id, path in paths.items():
-            self.set_path(vehicle_id, path)
+            self._set_path(vehicle_id, path)
 
+    # 检查所有应该移动的车，是否已经有可执行的路径计划。
     def _ensure_active_plans(self) -> None:
-        """确保所有可行驶车辆都有路径计划。"""
         for vehicle_id, vehicle in self.vehicle_manager.vehicles.items():
-            if not vehicle.can_move():
+            if not vehicle.can_move():  # 汽车能移动返回true，否则false
                 continue
 
+            # 跳过已经到达终点的汽车
             if vehicle.current_node_id == vehicle.destination_node_id:
                 vehicle.update_state(status=VehicleStatus.FINISHED)
                 continue
 
+            # 当前汽车没有计划，报错
             if vehicle_id not in self.active_plans:
                 raise ValueError(f"车辆缺少路径计划: {vehicle_id}")
 
     def _move_vehicle(self, vehicle_id: str, time_step: float) -> None:
-        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
-        plan = self.active_plans[vehicle_id]
+        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)  # 汽车对象
+        plan = self.active_plans[vehicle_id]    # 移动计划对象
 
-        remaining_time = max(time_step, 0.0)
-        remaining_energy_distance = vehicle.available_distance_km()
+        # 移动函数只负责执行移动流程：计算移动结果，再交给车辆统一更新状态。
+        result = self._calculate_movement_result(vehicle, plan, time_step)
 
-        while remaining_time > 0 and vehicle.can_move():
-            if plan.next_node_index >= len(plan.path):
-                vehicle.update_state(status=VehicleStatus.FINISHED)
-                self.active_plans.pop(vehicle_id, None)
-                return
+        # 更新汽车自身状态
+        vehicle.apply_movement_result(
+            distance_km=result.distance_km,
+            travel_time=result.travel_time,
+            current_node_id=result.reached_node_id,
+            status=result.status,
+        )
 
+        # 删除计划
+        if result.remove_plan:
+            self.active_plans.pop(vehicle_id, None)
+
+    def _calculate_movement_result(
+        self,
+        vehicle: Vehicle,
+        plan: MobilityPlan,
+        time_step: float,
+    ) -> MovementResult:
+        """根据路径计划和路网状态，计算一个时间步内的车辆移动结果。"""
+        remaining_time = max(time_step, 0.0)    # 当前行动计划剩余时间
+        remaining_energy_distance = vehicle.available_distance_km() # 剩余可行驶距离
+        result = MovementResult()
+
+        while remaining_time > 0 and vehicle.can_move():    # 只要还有剩余时间 并且 汽车可以移动
+            if plan.next_node_index >= len(plan.path):  # 路径走完了
+                result.status = VehicleStatus.FINISHED
+                result.remove_plan = True
+                break
+
+            # 找到当前要行驶的路段。
             current_node = plan.path[plan.next_node_index - 1]
             next_node = plan.path[plan.next_node_index]
             edge = self.road_network.get_edge_between(current_node, next_node)
@@ -128,6 +174,7 @@ class MobilityManager:
             if plan.current_edge_remaining_km is None:
                 plan.current_edge_remaining_km = edge.length_km
 
+            # 本轮可行驶距离同时受到时间、剩余路段长度和剩余电量限制。
             speed_km_per_second = edge.current_speed_kph / 3600
             distance_by_time = speed_km_per_second * remaining_time
             travel_distance = min(
@@ -137,41 +184,34 @@ class MobilityManager:
             )
 
             if travel_distance <= 0:
-                vehicle.update_state(status=VehicleStatus.FAILED)
-                self.active_plans.pop(vehicle_id, None)
-                return
+                result.status = VehicleStatus.FAILED
+                result.remove_plan = True
+                break
 
+            # 只累计临时移动结果，不在这里直接改车辆状态。
             travel_time = travel_distance / speed_km_per_second
-            self._update_vehicle_travel(vehicle, travel_distance, travel_time)
+            result.distance_km += travel_distance
+            result.travel_time += travel_time
             remaining_time -= travel_time
             remaining_energy_distance -= travel_distance
             plan.current_edge_remaining_km -= travel_distance
 
-            if vehicle.is_failed():
-                self.active_plans.pop(vehicle_id, None)
-                return
+            if remaining_energy_distance <= 1e-9:
+                result.status = VehicleStatus.FAILED
+                result.remove_plan = True
+                break
 
+            # 当前时间步不够走完整条边，车辆停留在边上，计划下次继续执行。
             if plan.current_edge_remaining_km > 1e-9:
-                return
+                break
 
-            vehicle.update_state(current_node_id=next_node)
+            # 当前边已经走完，车辆到达下一个节点，计划推进到下一段路。
+            result.reached_node_id = next_node
             plan.next_node_index += 1
             plan.current_edge_remaining_km = None
 
-        if vehicle.current_node_id == vehicle.destination_node_id:
-            vehicle.update_state(status=VehicleStatus.FINISHED)
-            self.active_plans.pop(vehicle_id, None)
+        if result.reached_node_id == vehicle.destination_node_id:
+            result.status = VehicleStatus.FINISHED
+            result.remove_plan = True
 
-    def _update_vehicle_travel(self, vehicle, travel_distance: float, travel_time: float) -> None:
-        energy_used = max(travel_distance, 0.0) * vehicle.energy_consumption_kwh_per_km
-        soc_drop = energy_used / vehicle.battery_capacity_kwh
-        new_soc = max(0.0, vehicle.soc - soc_drop)
-        new_status = VehicleStatus.FAILED if new_soc <= 0.0 else vehicle.status
-
-        vehicle.update_state(
-            soc=new_soc,
-            status=new_status,
-            total_distance_km=vehicle.total_distance_km + max(travel_distance, 0.0),
-            total_energy_used_kwh=vehicle.total_energy_used_kwh + energy_used,
-            total_travel_time=vehicle.total_travel_time + max(travel_time, 0.0),
-        )
+        return result
