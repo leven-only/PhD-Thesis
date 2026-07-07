@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from sim_env.road_network import RoadNetwork
-from sim_env.vehicle import Vehicle, VehicleManager, VehicleStatus
+from core_road_network import RoadNetwork
+from core_vehicle import Vehicle, VehicleManager, VehicleStatus
 
 
 @dataclass
@@ -55,31 +55,6 @@ class MobilityManager:
 
         for vehicle_id in list(self.active_plans.keys()):
             self._move_vehicle(vehicle_id, time_step)
-
-    # 给车辆设置一条待执行路径，建立移动计划对象。
-    def _set_path(self, vehicle_id: str, path: list[str]) -> None:
-        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)  # 获取 vehicle 对象
-
-        if not path:
-            raise ValueError("路径不能为空")
-
-        if vehicle.current_node_id != path[0]:
-            raise ValueError(
-                f"路径起点 {path[0]} 与车辆当前位置 {vehicle.current_node_id} 不一致"
-            )
-
-        if len(path) == 1:  # 路段节点即汽车终点
-            vehicle.update_state(status=VehicleStatus.FINISHED)
-            self.active_plans.pop(vehicle_id, None)
-            return
-
-        # 建立移动对象
-        self.active_plans[vehicle_id] = MobilityPlan(
-            vehicle_id=vehicle_id,
-            path=list(path),
-        )
-
-        vehicle.update_state(status=VehicleStatus.DRIVING)
 
     # 返回移动执行层状态
     def get_state(self) -> dict[str, Any]:
@@ -149,6 +124,7 @@ class MobilityManager:
         if result.remove_plan:
             self.active_plans.pop(vehicle_id, None)
 
+    # 计算 汽车 移动
     def _calculate_movement_result(
         self,
         vehicle: Vehicle,
@@ -215,3 +191,28 @@ class MobilityManager:
             result.remove_plan = True
 
         return result
+
+    # 给车辆设置一条待执行路径，建立移动计划对象。
+    def _set_path(self, vehicle_id: str, path: list[str]) -> None:
+        vehicle = self.vehicle_manager.get_vehicle(vehicle_id)  # 获取 vehicle 对象
+
+        if not path:
+            raise ValueError("路径不能为空")
+
+        if vehicle.current_node_id != path[0]:
+            raise ValueError(
+                f"路径起点 {path[0]} 与车辆当前位置 {vehicle.current_node_id} 不一致"
+            )
+
+        if len(path) == 1:  # 路段节点即汽车终点
+            vehicle.update_state(status=VehicleStatus.FINISHED)
+            self.active_plans.pop(vehicle_id, None)
+            return
+
+        # 建立移动对象
+        self.active_plans[vehicle_id] = MobilityPlan(
+            vehicle_id=vehicle_id,
+            path=list(path),
+        )
+
+        vehicle.update_state(status=VehicleStatus.DRIVING)
