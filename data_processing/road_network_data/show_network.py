@@ -2,11 +2,16 @@ import osmnx as ox
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parent
+RAW_NETWORK_DIR = BASE_DIR / "raw_network"
+RAW_GRAPHML_PATH = RAW_NETWORK_DIR / "beijing_sixth_ring_core_network.graphml"
+RAW_NETWORK_FIGURE_PATH = RAW_NETWORK_DIR / "beijing_sixth_ring_core_network.jpg"
+
 """
 Raw Network
 """
 def inspect_raw_network(
-    graphml_path="raw_network/beijing_sixth_ring_core_network.graphml"
+    graphml_path=RAW_GRAPHML_PATH
 ):
     """
     Inspect the basic structure and available attributes of the raw road network.
@@ -134,10 +139,17 @@ def inspect_raw_network(
 =========
 """
 def draw_road_network(
-    graphml_path="beijing_sixth_ring_core_network.graphml",
-    output_path="beijing_sixth_ring_core_network.jpg",
+    graphml_path=RAW_GRAPHML_PATH,
+    output_path=RAW_NETWORK_FIGURE_PATH,
     dpi=600
 ):
+    graphml_path = Path(graphml_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not graphml_path.exists():
+        raise FileNotFoundError(f"GraphML file not found: {graphml_path}")
+
     # 1. 读取路网
     G = ox.load_graphml(graphml_path)
 
@@ -169,4 +181,4 @@ def draw_road_network(
     print(f"Road network figure saved to: {output_path}")
 
 if __name__ == '__main__':
-    inspect_raw_network("processed_network/step_04_largest_component/network_largest_component.graphml")
+    draw_road_network()
