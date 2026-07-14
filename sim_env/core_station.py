@@ -83,10 +83,11 @@ class ChargingStation:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
         """应用当前时间步属于本站的属性更新事件。"""
         if not isinstance(action, dict):
-            return
+            return []
 
         for charger_type, updates in action.items():
             if charger_type not in self.chargers:
@@ -107,6 +108,8 @@ class ChargingStation:
                     raise AttributeError(f"不允许更新固定属性: {name}")
 
                 current_value[charger_type] = deepcopy(value)
+
+        return []
 
     def get_state(self) -> dict[str, Any]:
         """返回站点状态副本。"""
@@ -151,24 +154,30 @@ class StationManager:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
         """分发当前时间步的站点更新事件。"""
         if not isinstance(action, dict):
-            return
+            return []
 
         station_updates = action.get("station_updates")
         if not isinstance(station_updates, dict):
-            return
+            return []
 
+        produced_events: list[Any] = []
         for station_id, updates in station_updates.items():
             if station_id not in self._stations:
                 raise ValueError(f"充电站不存在: {station_id}")
 
-            self._stations[station_id].step(
+            station_events = self._stations[station_id].step(
                 time_step=time_step,
                 current_time=current_time,
                 action=updates,
+                events=events,
             )
+            produced_events.extend(station_events)
+
+        return produced_events
 
     def get_state(self) -> dict[str, Any]:
         """返回全部站点状态。"""

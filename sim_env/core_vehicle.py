@@ -63,16 +63,12 @@ class Vehicle:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
         """消费当前时间步属于本车的事件并更新自身状态。"""
-        if action is None:
-            return
-        if not isinstance(action, list):
-            raise TypeError("车辆事件必须使用列表传入")
-
-        for event in action:
+        for event in events or []:
             if not isinstance(event, VehicleEvent):
-                raise TypeError("车辆只能处理 VehicleEvent")
+                continue
             if event.vehicle_id != self.vehicle_id:
                 continue
 
@@ -84,6 +80,8 @@ class Vehicle:
                 self.status = VehicleStatus(event.data["status"])
             else:
                 raise ValueError(f"未知车辆事件类型: {event.event_type}")
+
+        return []
 
     def get_state(self) -> dict[str, Any]:
         """返回车辆状态副本。"""
@@ -151,7 +149,6 @@ class VehicleManager:
 
     def __init__(self, vehicles: Optional[list[Vehicle]] = None) -> None:
         self._vehicles: dict[str, Vehicle] = {}
-        self._pending_events: dict[str, list[VehicleEvent]] = {}
 
         for vehicle in vehicles or []:
             if vehicle.vehicle_id in self._vehicles:
@@ -160,8 +157,7 @@ class VehicleManager:
             self._vehicles[vehicle.vehicle_id] = vehicle
 
     def reset(self) -> None:
-        """清空待处理事件并重置所有车辆。"""
-        self._pending_events = {}
+        """重置所有车辆。"""
         for vehicle in self._vehicles.values():
             vehicle.reset()
 
@@ -170,17 +166,23 @@ class VehicleManager:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
-        """把当前时间步的事件交给对应车辆处理。"""
-        pending_events = self._pending_events
-        self._pending_events = {}
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
+        """把 Env 收集的事件交给对应车辆处理。"""
+        vehicle_events: dict[str, list[VehicleEvent]] = {}
+        for event in events or []:
+            if isinstance(event, VehicleEvent):
+                vehicle_events.setdefault(event.vehicle_id, []).append(event)
 
         for vehicle_id, vehicle in self._vehicles.items():
             vehicle.step(
                 time_step=time_step,
                 current_time=current_time,
-                action=pending_events.get(vehicle_id, []),
+                action=None,
+                events=vehicle_events.get(vehicle_id, []),
             )
+
+        return []
 
     def get_state(self) -> dict[str, Any]:
         """返回车辆集合状态。"""
@@ -197,15 +199,6 @@ class VehicleManager:
                 for vehicle_id, vehicle in self._vehicles.items()
             },
         }
-
-    def publish_event(self, event: VehicleEvent) -> None:
-        """接收其他组件产生的车辆事件，等待下次 step 统一处理。"""
-        if event.vehicle_id not in self._vehicles:
-            raise ValueError(f"车辆不存在: {event.vehicle_id}")
-
-        self._pending_events.setdefault(event.vehicle_id, []).append(
-            deepcopy(event)
-        )
 
     def get_vehicle(self, vehicle_id: str) -> Vehicle:
         """查询一个车辆并返回副本。"""

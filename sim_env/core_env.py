@@ -1,5 +1,6 @@
-"""环境整合模块，用于统一调度路网、车辆、站点和时间推进的仿真主循环。"""
+"""环境整合模块，统一调度组件、时钟、动作和组件事件。"""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -63,6 +64,7 @@ class EVChargingEnv:
         self.step_count = 0
         self.done = False
         self.metrics: dict[str, Any] = {}
+        self.last_events: list[Any] = []
         self.components: dict[str, EnvComponent] = {}
         self.observation_items: dict[str, ObservationItem] = {}
 
@@ -87,22 +89,36 @@ class EVChargingEnv:
         self._register_component("demand", self.demand_generator, include_in_observation=False)
         self._register_component("road_network", self.road_network)
         self._register_component("mobility", self.mobility_manager)
-        self._register_component("vehicles", self.vehicle_manager)
         self._register_component("stations", self.station_manager)
+        self._register_component("vehicles", self.vehicle_manager)
 
     # 更新组件信息
-    def _update_component(self, component: Optional[Any], action: Optional[Any] = None) -> None:
-        """推进组件一个时间步。"""
+    def _update_component(
+        self,
+        component: Optional[Any],
+        action: Optional[Any],
+        events: list[Any],
+    ) -> list[Any]:
+        """推进组件一个时间步并返回该组件产生的事件。"""
         if component is None:
-            return
+            return []
 
-        self._call_component_method(
+        produced_events = self._call_component_method(
             component,
             "step",
             self.config.time_step,
             self.current_time,
             action,
+            deepcopy(events),
         )
+
+        if produced_events is None:
+            return []
+        if not isinstance(produced_events, list):
+            component_type = type(component).__name__
+            raise TypeError(f"组件 {component_type}.step() 必须返回事件列表")
+
+        return produced_events
 
     # 返回组件状态信息
     def _get_component_state(self, component: Optional[Any]) -> Any:
@@ -197,8 +213,16 @@ class EVChargingEnv:
         if self.done:
             return self.get_observation(), 0.0, True, self.get_info()
 
+        events: list[Any] = []
         for component_item in self.components.values():
-            self._update_component(component_item.component, action=action)
+            produced_events = self._update_component(
+                component=component_item.component,
+                action=action,
+                events=events,
+            )
+            events.extend(deepcopy(produced_events))
+
+        self.last_events = events
 
         self.current_time += self.config.time_step
         self.step_count += 1
@@ -225,6 +249,7 @@ class EVChargingEnv:
             "total_steps": 0,
             "finished": False,
         }
+        self.last_events = []
 
         for component_item in self.components.values():
             self._reset_component(component_item.component)
@@ -255,6 +280,7 @@ class EVChargingEnv:
             "current_time": self.current_time,
             "step_count": self.step_count,
             "time_step": self.config.time_step,
+            "event_count": len(self.last_events),
             "metrics": self.get_metrics(),
         }
 

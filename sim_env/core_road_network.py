@@ -79,14 +79,15 @@ class RoadNetwork:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
         """处理当前时间步的道路更新事件。"""
         if not isinstance(action, dict):
-            return
+            return []
 
         road_updates = action.get("road_updates")
         if not isinstance(road_updates, dict):
-            return
+            return []
 
         for edge_id, updates in road_updates.items():
             if edge_id not in self._edges:
@@ -108,6 +109,8 @@ class RoadNetwork:
                     )
 
                 setattr(edge, name, parsed_value)
+
+        return []
 
     def get_state(self) -> dict[str, Any]:
         """返回完整路网状态副本。"""

@@ -55,12 +55,17 @@ class MobilityManager:
         time_step: float,
         current_time: float,
         action: Optional[Any] = None,
-    ) -> None:
-        """应用路径动作、推进计划并发布移动事件。"""
-        self._apply_path_actions(action)
+        events: Optional[list[Any]] = None,
+    ) -> list[Any]:
+        """应用路径动作、推进计划并返回移动事件。"""
+        produced_events = self._apply_path_actions(action)
 
         for vehicle_id in list(self._active_plans):
-            self._advance_plan(vehicle_id, time_step)
+            produced_events.append(
+                self._advance_plan(vehicle_id, time_step)
+            )
+
+        return produced_events
 
     def get_state(self) -> dict[str, Any]:
         """返回当前路径执行状态。"""
@@ -76,18 +81,27 @@ class MobilityManager:
             },
         }
 
-    def _apply_path_actions(self, action: Optional[Any]) -> None:
+    def _apply_path_actions(self, action: Optional[Any]) -> list[Any]:
         if not isinstance(action, dict):
-            return
+            return []
 
         paths = action.get("vehicle_paths")
         if not isinstance(paths, dict):
-            return
+            return []
 
+        produced_events: list[Any] = []
         for vehicle_id, path in paths.items():
-            self._set_path(vehicle_id, path)
+            event = self._set_path(vehicle_id, path)
+            if event is not None:
+                produced_events.append(event)
 
-    def _set_path(self, vehicle_id: str, path: list[str]) -> None:
+        return produced_events
+
+    def _set_path(
+        self,
+        vehicle_id: str,
+        path: list[str],
+    ) -> Optional[VehicleEvent]:
         vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
         if not path:
             raise ValueError("路径不能为空")
@@ -102,40 +116,40 @@ class MobilityManager:
                 raise ValueError("单节点路径只能用于已经到达终点的车辆")
 
             self._active_plans.pop(vehicle_id, None)
-            self.vehicle_manager.publish_event(
-                VehicleEvent(
-                    vehicle_id=vehicle_id,
-                    event_type="status",
-                    data={"status": VehicleStatus.FINISHED},
-                )
+            return VehicleEvent(
+                vehicle_id=vehicle_id,
+                event_type="status",
+                data={"status": VehicleStatus.FINISHED},
             )
-            return
 
         self._active_plans[vehicle_id] = MobilityPlan(
             vehicle_id=vehicle_id,
             path=list(path),
         )
+        return None
 
-    def _advance_plan(self, vehicle_id: str, time_step: float) -> None:
+    def _advance_plan(
+        self,
+        vehicle_id: str,
+        time_step: float,
+    ) -> VehicleEvent:
         vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
         plan = self._active_plans[vehicle_id]
         result = self._calculate_movement(vehicle, plan, time_step)
 
-        self.vehicle_manager.publish_event(
-            VehicleEvent(
-                vehicle_id=vehicle_id,
-                event_type="movement",
-                data={
-                    "distance_km": result.distance_km,
-                    "travel_time": result.travel_time,
-                    "current_node_id": result.reached_node_id,
-                    "status": result.status,
-                },
-            )
-        )
-
         if result.remove_plan:
             self._active_plans.pop(vehicle_id, None)
+
+        return VehicleEvent(
+            vehicle_id=vehicle_id,
+            event_type="movement",
+            data={
+                "distance_km": result.distance_km,
+                "travel_time": result.travel_time,
+                "current_node_id": result.reached_node_id,
+                "status": result.status,
+            },
+        )
 
     def _calculate_movement(
         self,
