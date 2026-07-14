@@ -1,0 +1,2 @@
+1. 凡是注册到 EVChargingEnv 中的组件，必须实现 reset、step和get_state 三个基本函数
+2. 针对每个组件（component），

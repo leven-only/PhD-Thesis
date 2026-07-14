@@ -3,13 +3,13 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from sim_env.env import EVChargingEnv, EnvConfig
+from sim_env.core_env import EVChargingEnv, EnvConfig
 from sim_env.example_env.default_road_network import build_default_road_network
 from sim_env.example_env.default_stations import build_default_station_manager
-from sim_env.mobility import MobilityManager
-from sim_env.road_network import RoadNetwork
-from sim_env.station import StationManager
-from sim_env.vehicle import Vehicle, VehicleManager
+from sim_env.core_mobility import MobilityManager
+from sim_env.core_road_network import RoadNetwork
+from sim_env.core_station import StationManager
+from sim_env.core_vehicle import Vehicle, VehicleManager
 
 
 @dataclass
@@ -49,7 +49,7 @@ def build_default_env(
         vehicle_manager=vehicle_manager,
     )
 
-    station_manager = build_default_station_manager(vehicle_manager)
+    station_manager = build_default_station_manager()
 
     env = EVChargingEnv(
         config=env_config,

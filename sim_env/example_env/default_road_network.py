@@ -1,6 +1,6 @@
 """默认路网样例。"""
 
-from sim_env.road_network import RoadEdge, RoadNetwork, RoadNode
+from sim_env.core_road_network import RoadEdge, RoadNetwork, RoadNode
 
 
 def build_default_road_network() -> RoadNetwork:

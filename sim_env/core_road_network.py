@@ -1,7 +1,8 @@
-"""路网模块，用于加载道路节点与边，并提供路径查询、行驶时间和交通状态相关能力。"""
+"""固定路网环境，负责道路状态更新和路径查询。"""
 
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 import networkx as nx
 
@@ -18,7 +19,7 @@ class RoadNode:
 
 @dataclass
 class RoadEdge:
-    """无向路网边。"""
+    """无向道路。"""
 
     edge_id: str
     node_u: str
@@ -28,181 +29,167 @@ class RoadEdge:
 
     @property
     def current_speed_kph(self) -> float:
-        """返回当前速度。"""
         return max(self.speed_kph, 1e-6)
 
     @property
     def travel_time_seconds(self) -> float:
-        """返回当前交通状态下通过该边所需时间。"""
         return self.length_km / self.current_speed_kph * 3600
 
 
 class RoadNetwork:
-    """简单无向路网环境。"""
+    """拓扑固定；道路属性只能在 step 中随环境事件更新。"""
 
     def __init__(
         self,
         nodes: Optional[list[RoadNode]] = None,
         edges: Optional[list[RoadEdge]] = None,
     ) -> None:
-        self.nodes: dict[str, RoadNode] = {}
-        self.edges: dict[str, RoadEdge] = {}
-        self.graph = nx.Graph()
+        self._nodes: dict[str, RoadNode] = {}
+        self._edges: dict[str, RoadEdge] = {}
+        self._graph = nx.Graph()
 
         for node in nodes or []:
-            self.add_node(node)
+            if node.node_id in self._nodes:
+                raise ValueError(f"节点 ID 已存在: {node.node_id}")
+
+            self._nodes[node.node_id] = deepcopy(node)
+            self._graph.add_node(node.node_id)
 
         for edge in edges or []:
-            self.add_edge(edge)
+            if edge.edge_id in self._edges:
+                raise ValueError(f"边 ID 已存在: {edge.edge_id}")
+            if edge.node_u not in self._nodes or edge.node_v not in self._nodes:
+                raise ValueError(f"道路端点不存在: {edge.node_u} - {edge.node_v}")
 
-    # 同步更新graph信息
-    def _sync_graph_edge(self, edge_id: str) -> None:
-        """将 RoadEdge 的动态属性同步到 networkx.Graph。"""
-        edge = self.edges[edge_id]
-        graph_edge = cast(dict[str, Any], self.graph[edge.node_u][edge.node_v])
-        graph_edge["speed_kph"] = edge.speed_kph
-        graph_edge["current_speed_kph"] = edge.current_speed_kph
-        graph_edge["travel_time_seconds"] = edge.travel_time_seconds
+            self._edges[edge.edge_id] = deepcopy(edge)
+            self._graph.add_edge(
+                edge.node_u,
+                edge.node_v,
+                edge_id=edge.edge_id,
+            )
 
-    # 添加路网节点
-    def add_node(self, node: RoadNode) -> None:
-        if node.node_id in self.nodes:
-            raise ValueError(f"节点 ID 已存在: {node.node_id}")
+        self._initial_edges = deepcopy(self._edges)
 
-        self.nodes[node.node_id] = node
-        self.graph.add_node(
-            node.node_id,
-            name=node.name,
-            node=node,
-        )
-
-    # 添加无向边
-    def add_edge(self, edge: RoadEdge) -> None:
-        if edge.edge_id in self.edges:
-            raise ValueError(f"边 ID 已存在: {edge.edge_id}")
-
-        if edge.node_u not in self.nodes:
-            raise ValueError(f"边的起点不存在: {edge.node_u}")
-
-        if edge.node_v not in self.nodes:
-            raise ValueError(f"边的终点不存在: {edge.node_v}")
-
-        self.edges[edge.edge_id] = edge
-        self.graph.add_edge(
-            edge.node_u,
-            edge.node_v,
-            edge_id=edge.edge_id,
-            length_km=edge.length_km,
-            speed_kph=edge.speed_kph,
-            current_speed_kph=edge.current_speed_kph,
-            travel_time_seconds=edge.travel_time_seconds,
-            edge=edge,
-        )
-
-    # 重置路网状态。
     def reset(self) -> None:
-        """
-        当前版本不在路网内部保存初始速度备份。
-        后续速度状态由外部交通数据导入并通过 update_speeds 更新。
-        """
+        """恢复道路的初始属性。"""
+        self._edges = deepcopy(self._initial_edges)
 
-    # 推进一个时间步，更新路网信息
-    def step(self, time_step: float, current_time: float, action: Optional[Any] = None) -> None:
-        """推进路网一个时间步。
+    def step(
+        self,
+        time_step: float,
+        current_time: float,
+        action: Optional[Any] = None,
+    ) -> None:
+        """处理当前时间步的道路更新事件。"""
+        if not isinstance(action, dict):
+            return
 
-        初始版本只根据 action 更新边速度，不主动生成交通波动。
-        """
-        if isinstance(action, dict) and "edge_speeds_kph" in action:
-            self.update_speeds(action["edge_speeds_kph"])
+        road_updates = action.get("road_updates")
+        if not isinstance(road_updates, dict):
+            return
 
-    # 批量更新边的当前速度。
-    def update_speeds(self, edge_speeds_kph: dict[str, float]) -> None:
-        for edge_id, speed_kph in edge_speeds_kph.items():
-            if edge_id not in self.edges:
-                continue
+        for edge_id, updates in road_updates.items():
+            if edge_id not in self._edges:
+                raise ValueError(f"道路不存在: {edge_id}")
+            if not isinstance(updates, dict):
+                raise TypeError(f"道路更新必须是字典: {edge_id}")
 
-            self.edges[edge_id].speed_kph = max(float(speed_kph), 0.0)
-            self._sync_graph_edge(edge_id)
+            unknown = set(updates) - {"length_km", "speed_kph"}
+            if unknown:
+                names = ", ".join(sorted(unknown))
+                raise AttributeError(f"不允许更新道路属性: {names}")
 
-    # 返回两个相邻节点之间的边。
-    def get_edge_between(self, node_u: str, node_v: str) -> RoadEdge:
-        edge_data = self.graph.get_edge_data(node_u, node_v)
+            edge = self._edges[edge_id]
+            for name, value in updates.items():
+                parsed_value = float(value)
+                if parsed_value < 0:
+                    raise ValueError(
+                        f"道路属性不能为负数: {name}={parsed_value}"
+                    )
 
-        if edge_data is None:
-            raise ValueError(f"节点之间不存在边: {node_u} - {node_v}")
+                setattr(edge, name, parsed_value)
 
-        edge_id = edge_data["edge_id"]
-        return self.edges[edge_id]
-
-    # 返回节点的相邻节点。
-    def get_neighbors(self, node_id: str) -> list[str]:
-        if node_id not in self.graph:
-            return []
-
-        return list(self.graph.neighbors(node_id))
-
-    # 返回当前路网图的副本，避免外部直接修改内部图。
-    def get_graph(self) -> nx.Graph:
-        return self.graph.copy()
-
-    # 获取路段距离
-    def path_distance_km(self, path: list[str]) -> float:
-        """计算路径总距离。"""
-        return sum(
-            self.get_edge_between(path[i], path[i + 1]).length_km
-            for i in range(len(path) - 1)
-        )
-
-    # 计算路径当前通行时间。
-    def path_travel_time_seconds(self, path: list[str]) -> float:
-        return sum(
-            self.get_edge_between(path[i], path[i + 1]).travel_time_seconds
-            for i in range(len(path) - 1)
-        )
-
-    # 返回路网状态。
     def get_state(self) -> dict[str, Any]:
+        """返回完整路网状态副本。"""
         return {
-            "node_count": len(self.nodes),
-            "edge_count": len(self.edges),
+            "node_count": len(self._nodes),
+            "edge_count": len(self._edges),
             "nodes": {
-                node_id: {
-                    "name": node.name,
-                }
-                for node_id, node in self.nodes.items()
+                node_id: deepcopy(vars(node))
+                for node_id, node in self._nodes.items()
             },
             "edges": {
                 edge_id: {
-                    "node_u": edge.node_u,
-                    "node_v": edge.node_v,
-                    "length_km": edge.length_km,
-                    "speed_kph": edge.speed_kph,
+                    **deepcopy(vars(edge)),
                     "current_speed_kph": edge.current_speed_kph,
                     "travel_time_seconds": edge.travel_time_seconds,
                 }
-                for edge_id, edge in self.edges.items()
+                for edge_id, edge in self._edges.items()
             },
         }
 
-    # 计算最短路径。
-    def shortest_path(self, origin_node_id: str, destination_node_id: str, weight: str = "time") -> list[str]:
-        if origin_node_id not in self.nodes:
+    def get_edge_between(self, node_u: str, node_v: str) -> RoadEdge:
+        """查询两个相邻节点之间的道路并返回副本。"""
+        edge_data = self._graph.get_edge_data(node_u, node_v)
+        if edge_data is None:
+            raise ValueError(f"节点之间不存在边: {node_u} - {node_v}")
+
+        return deepcopy(self._edges[edge_data["edge_id"]])
+
+    def get_neighbors(self, node_id: str) -> list[str]:
+        """查询一个节点的全部相邻节点。"""
+        if node_id not in self._graph:
+            return []
+
+        return list(self._graph.neighbors(node_id))
+
+    def path_distance_km(self, path: list[str]) -> float:
+        """查询一条路径的总距离。"""
+        return sum(
+            self.get_edge_between(path[index], path[index + 1]).length_km
+            for index in range(len(path) - 1)
+        )
+
+    def path_travel_time_seconds(self, path: list[str]) -> float:
+        """查询一条路径在当前路况下的总通行时间。"""
+        return sum(
+            self.get_edge_between(
+                path[index],
+                path[index + 1],
+            ).travel_time_seconds
+            for index in range(len(path) - 1)
+        )
+
+    def shortest_path(
+        self,
+        origin_node_id: str,
+        destination_node_id: str,
+        weight: str = "time",
+    ) -> list[str]:
+        """按距离或当前通行时间查询最短路径。"""
+        if origin_node_id not in self._nodes:
             raise ValueError(f"起点不存在: {origin_node_id}")
-
-        if destination_node_id not in self.nodes:
+        if destination_node_id not in self._nodes:
             raise ValueError(f"终点不存在: {destination_node_id}")
-
         if weight not in ("time", "distance"):
             raise ValueError(f"不支持的路径权重: {weight}")
 
-        graph_weight = "length_km" if weight == "distance" else "travel_time_seconds"
+        def edge_weight(node_u: str, node_v: str, data: dict[str, Any]) -> float:
+            edge = self._edges[data["edge_id"]]
+            return (
+                edge.length_km
+                if weight == "distance"
+                else edge.travel_time_seconds
+            )
 
         try:
             return nx.shortest_path(
-                self.graph,
+                self._graph,
                 source=origin_node_id,
                 target=destination_node_id,
-                weight=graph_weight,
+                weight=edge_weight,
             )
         except nx.NetworkXNoPath as exc:
-            raise ValueError(f"无法从 {origin_node_id} 到达 {destination_node_id}")
+            raise ValueError(
+                f"无法从 {origin_node_id} 到达 {destination_node_id}"
+            ) from exc
