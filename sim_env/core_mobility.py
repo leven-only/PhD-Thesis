@@ -18,7 +18,7 @@ class MobilityPlan:
     """一辆车正在执行的路径计划。"""
 
     vehicle_id: str
-    path: list[str]
+    path: list[int]
     next_node_index: int = 1
     current_edge_remaining_km: Optional[float] = None
 
@@ -29,7 +29,7 @@ class MovementResult:
 
     distance_km: float = 0.0
     travel_time: float = 0.0
-    reached_node_id: Optional[str] = None
+    reached_node_id: Optional[int] = None
     status: Optional[VehicleStatus] = None
     remove_plan: bool = False
 
@@ -100,7 +100,7 @@ class MobilityManager:
     def _set_path(
         self,
         vehicle_id: str,
-        path: list[str],
+        path: list[int],
     ) -> Optional[VehicleEvent]:
         vehicle = self.vehicle_manager.get_vehicle(vehicle_id)
         if not path:
@@ -172,9 +172,9 @@ class MobilityManager:
             edge = self.road_network.get_edge_between(current_node, next_node)
 
             if plan.current_edge_remaining_km is None:
-                plan.current_edge_remaining_km = edge.length_km
+                plan.current_edge_remaining_km = edge["length_km"]
 
-            speed_km_per_second = edge.current_speed_kph / 3600
+            speed_km_per_second = max(edge["speed_kph"], 1e-6) / 3600
             travel_distance = min(
                 plan.current_edge_remaining_km,
                 speed_km_per_second * remaining_time,

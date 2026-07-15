@@ -32,14 +32,14 @@ class Vehicle:
     """单辆汽车的静态参数和动态状态。"""
 
     vehicle_id: str
-    origin_node_id: str
-    destination_node_id: str
+    origin_node_id: int
+    destination_node_id: int
     battery_capacity_kwh: float = 60.0
     low_soc_threshold: float = 0.2
     target_soc: float = 0.8
     energy_consumption_kwh_per_km: float = 0.18
 
-    current_node_id: Optional[str] = None
+    current_node_id: Optional[int] = None
     soc: float = 1.0
     status: VehicleStatus = VehicleStatus.IDLE
     total_distance_km: float = 0.0
@@ -101,7 +101,7 @@ class Vehicle:
         self,
         distance_km: float,
         travel_time: float,
-        current_node_id: Optional[str] = None,
+        current_node_id: Optional[int] = None,
         status: Optional[VehicleStatus] = None,
     ) -> None:
         """应用移动事件；能耗与 SOC 模型后续补充。"""

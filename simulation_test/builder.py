@@ -8,8 +8,8 @@ from sim_env.core_mobility import MobilityManager
 from sim_env.core_road_network import RoadNetwork
 from sim_env.core_station import StationManager
 from sim_env.core_vehicle import Vehicle, VehicleManager
-from simulation_test.default_road_network import build_default_road_network
-from simulation_test.default_stations import build_default_station_manager
+from sim_env.default_road_network import build_default_road_network
+from sim_env.default_stations import build_default_station_manager
 
 
 @dataclass
@@ -36,8 +36,8 @@ def build_test_env(
         vehicles=[
             Vehicle(
                 vehicle_id="vehicle_001",
-                origin_node_id="node_01",
-                destination_node_id="node_10",
+                origin_node_id=0,
+                destination_node_id=9,
             )
         ]
     )

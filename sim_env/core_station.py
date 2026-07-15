@@ -20,7 +20,7 @@ class ChargingStation:
     def __init__(
         self,
         station_id: str,
-        mapped_node: str,
+        mapped_node: int,
         chargers: dict[str, Union[ChargerTypeConfig, dict[str, Any]]],
         access_distance_km: float = 0.0,
         **attributes: Any,

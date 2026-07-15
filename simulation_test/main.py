@@ -1,43 +1,25 @@
 """基础仿真端到端测试入口。"""
-
-import sys
-from pathlib import Path
 from typing import Any
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from simulation_test.builder import build_test_env
-
+from sim_env.core_env import EVChargingEnv
+from sim_env.core_road_network import RoadNetwork
+import sim_env.default_road_network as default_road_network
 
 def main() -> None:
-    env, context = build_test_env()
-    observation = env.reset()
-    print_vehicle_state("初始状态", observation)
-
-    initial_path = context.road_network.shortest_path(
-        "node_01",
-        "node_10",
-        weight="time",
+    # 加载数据
+    road_matrix = default_road_network.road_matrix
+    speed_matrix = default_road_network.speed_matrix
+    speed_timetable = default_road_network.speed_timetable
+    start_time = default_road_network.start_time
+    # 创建环境对象
+    road_network = RoadNetwork(
+        matrix=road_matrix,
+        speed_matrix=speed_matrix,
+        speed_timetable=speed_timetable,
+        start_time=start_time,
     )
-    first_action = {
-        "vehicle_paths": {
-            "vehicle_001": initial_path,
-        }
-    }
+    print(road_network.get_edge_between(0, 1))
 
-    stop_reason = "environment_done"
-    while not env.done:
-        action = first_action if env.step_count == 0 else None
-        observation, _, _, _ = env.step(action)
-        print_vehicle_state(f"第 {env.step_count} 步", observation)
-
-        vehicle_state = observation["vehicles"]["vehicles"]["vehicle_001"]
-        if vehicle_state["status"] in ("finished", "failed"):
-            stop_reason = f"vehicle_{vehicle_state['status']}"
-            break
-
-    print("停止原因:", stop_reason)
 
 
 def print_vehicle_state(label: str, observation: dict[str, Any]) -> None:

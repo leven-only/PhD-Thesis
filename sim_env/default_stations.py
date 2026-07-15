@@ -9,7 +9,7 @@ def build_default_station_manager() -> StationManager:
         stations=[
             ChargingStation(
                 station_id="station_001",
-                mapped_node="node_06",
+                mapped_node=5,
                 access_distance_km=0.0,
                 chargers={
                     "fast": {
@@ -21,7 +21,7 @@ def build_default_station_manager() -> StationManager:
             ),
             ChargingStation(
                 station_id="station_002",
-                mapped_node="node_09",
+                mapped_node=8,
                 access_distance_km=0.0,
                 chargers={
                     "fast": {
