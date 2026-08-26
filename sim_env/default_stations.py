@@ -17,7 +17,6 @@ def build_default_station_manager() -> StationManager:
                         "power_kw": 60.0,
                     },
                 },
-                tou_tariff={"fast": 1.0},
             ),
             ChargingStation(
                 station_id="station_002",
@@ -29,7 +28,6 @@ def build_default_station_manager() -> StationManager:
                         "power_kw": 90.0,
                     },
                 },
-                tou_tariff={"fast": 1.2},
             ),
         ],
     )
