@@ -1,16 +1,3 @@
-"""路网组件：负责维护道路拓扑，并根据仿真时间刷新道路速度。
-
-角色说明：RoadNetwork 属于"世界状态"（world state），不是反应式组件——
-它只根据 current_time 更新自身，不接收/产生 events，因此不能套用
-EVChargingEnv 给反应式组件（Vehicle/Station/Mobility 等）用的统一
-`step(time_step, current_time, action, events)` 调用方式；应该由 env
-在每个 tick 显式调用 `step(current_time)`。
-
-不做输入校验：调用方需要自己保证 matrix/speed_matrix/speed_timetable
-格式正确（方阵、非负、对角线为 0、速度行数跟非零元素个数对应、时间表
-严格递增），构造时不会检查、也不会转换数据类型。
-"""
-
 from bisect import bisect_right
 from typing import Any
 
@@ -18,40 +5,37 @@ import networkx as nx
 
 
 class RoadNetwork:
-    """由邻接矩阵和速度数据构成的固定拓扑路网。
-
-    ``matrix`` 的非零值表示道路长度（km）。矩阵按从上到下、从左到右扫描；
-    每个非零元素依次对应 ``speed_matrix`` 的一列，``speed_matrix`` 的每一行
-    表示一个速度快照。矩阵的行列下标直接作为节点 ID。
-    """
-
     def __init__(
         self,
-        matrix: Any,
+        matrix,
         speed_matrix: Any,
         speed_timetable: Any,
         start_time: float,
     ) -> None:
-        self.matrix = matrix
-        self.speed_matrix = speed_matrix
-        self.speed_timetable = speed_timetable
-        self.start_time = start_time
+        self.matrix = matrix    # 路网矩阵，0表示不连接，1表示连接
+        self.speed_matrix = speed_matrix    # 速度矩阵：每行代表一个速度的snapshot
+        self.speed_timetable = speed_timetable  # 时间戳数组，元素数量与speed_matrix 行数相同，每个元素代表当时的时间
+        self.start_time = start_time    # 场景开始时间
 
-        self.node_count = len(self.matrix)
+        self.node_count = len(self.matrix)  # 节点数量
+        self.graph = None  # 有向图对象：路网的核心数据结构，节点为路网节点，边为道路及其属性（edge_id/length_km/speed_kph/travel_time_seconds），由 _initialize_network() 构建
+        self._edge_positions = []  # 边位置列表：邻接矩阵中所有非零元素的(行, 列)坐标，即全部道路的(起点, 终点)编号，顺序决定 speed_matrix 每一列对应哪条道路，由 _initialize_network() 填充
+        self.current_speed_snapshot_index = None  # 当前速度快照下标：speed_matrix/speed_timetable 中正在生效的行下标，由 _apply_speed_snapshot() 更新（reset()/step() 内部调用）
+
         self._initialize_network()
-        self.reset()
 
     # ------------------------------------------------------------------
-    # 世界状态接口：reset / step / get_state
+    # 标准状态接口：reset / step / get_state
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
         """把所有道路速度恢复到 start_time 对应的速度快照。"""
-        self._apply_speed_snapshot(self._snapshot_index_at(self.start_time))
+        start_time = self._system_time2speed_index(self.start_time)
+        self._apply_speed_snapshot(start_time)
 
     def step(self, current_time: float) -> None:
         """根据当前仿真时间刷新道路速度；如果快照没变则什么都不做。"""
-        snapshot_index = self._snapshot_index_at(current_time)
+        snapshot_index = self._system_time2speed_index(current_time)
         if snapshot_index != self.current_speed_snapshot_index:
             self._apply_speed_snapshot(snapshot_index)
 
@@ -74,9 +58,8 @@ class RoadNetwork:
     # ------------------------------------------------------------------
 
     def get_edge_between(self, node_u: int, node_v: int) -> dict[str, Any]:
-        """返回两个节点之间道路的属性字典，供其他组件（如 mobility）直接使用。
-
-        返回的是图中边属性的直接引用，只建议读取；速度更新统一由 step() 完成。
+        """
+        返回节点之间路段信息
         """
         try:
             return self.graph.edges[node_u, node_v]
@@ -84,7 +67,7 @@ class RoadNetwork:
             raise ValueError(f"节点之间不存在道路: {node_u} -> {node_v}") from exc
 
     # ------------------------------------------------------------------
-    # 内部实现（下划线开头，外部代码不应依赖）
+    # 内部函数，不向外部提供
     # ------------------------------------------------------------------
 
     def _initialize_network(self) -> None:
@@ -109,7 +92,10 @@ class RoadNetwork:
             )
 
     def _apply_speed_snapshot(self, snapshot_index: int) -> None:
-        """用指定下标的速度快照更新全部道路的速度和通行时间。"""
+        """
+        更新边属性   距离、速度（km/h）、通行时间（s）
+        更新self属性    当前速度快照下标
+        """
         speeds = self.speed_matrix[snapshot_index]
         for (row, column), speed in zip(self._edge_positions, speeds):
             edge_data = self.graph.edges[row, column]
@@ -117,6 +103,9 @@ class RoadNetwork:
             edge_data["travel_time_seconds"] = edge_data["length_km"] / max(speed, 1e-6) * 3600
         self.current_speed_snapshot_index = snapshot_index
 
-    def _snapshot_index_at(self, current_time: float) -> int:
-        """返回不晚于 current_time 的最近速度快照下标。"""
+    def _system_time2speed_index(self, current_time: float) -> int:
+        """
+        根据当前系统时间，计算在 speed_timetable 中找到最接近当前系统时间的左侧时间
+        index 用于获取当前时间的速度快中
+        """""
         return max(bisect_right(self.speed_timetable, current_time) - 1, 0)
