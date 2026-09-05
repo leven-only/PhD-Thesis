@@ -1,38 +1,3 @@
-"""充电站组件：站点属性 + 按时间刷新的动态运行状态。
-
-站点信息是抽象、整体层面的——不追踪具体哪个充电桩被哪辆车占用，只用排队论
-里的话务强度（offered load）ρ = λ(t)×μ 表示"平均意义上这个 charger type
-有多拥堵"，用它推出期望空闲桩数、拥堵服务费、期望等待时间。ρ 越大代表
-越拥堵，空闲桩越少、等待时间越长，这跟"真实精确计数"是两种不同粒度的
-建模，这里选择后者的抽象版本。
-
-注意 proposal 公式 (3.5) 里的 ρ 就是这个"期望忙碌充电桩数"（offered load，
-量级跟 num_chargers 一样大，不是 0~1 之间的比例），跟一般 M/M/k 记号里
-"利用率 = λ/(kμ) ∈[0,1)"是两个概念——本文件内部区分为：
-    _utilization()  ->  标准化利用率 ρ_norm = λ/(kμ) ∈[0,1)，仅用于内部推导
-                        offered_load，不直接对外暴露；
-    offered_load    ->  ρ_norm × num_chargers = λ×μ，proposal 公式 (3.5) 里
-                        真正参与 available_chargers 和 waiting_time 计算的量。
-两者数值上满足 offered_load = num_chargers × _utilization()，是同一件事的
-两种刻度，不是两套独立参数。
-
-因此 ChargingStation 现在完全是"世界状态"角色，不再有任何按事件触发的更新：
-reset() / step(current_time, tou_tariff) 就是全部对外接口，`available_chargers`
-/`dynamic_service_fee`/`waiting_time_minutes` 都是每次调用时用 current_time
-对应的电价和静态参数（λ、μ、σ、k）现算出来的派生量。
-
-如果 arrival_rate_per_hour 以后要做成按时间变化的表（类似 TOU tariff 的
-高低峰），ρ 以及后面几个派生量就会跟着自然随时间波动；现在先假定它是每个
-charger type 的一个固定常数，所以这几个派生量在整个仿真过程中不会变化，只有
-total_price 会因为 tou_tariff 随时间变化而变化。
-
-以下三个派生量已按 proposal 3.4.2 节原文公式实现，均已核对截图确认：
-    dynamic_service_fee  <- 公式 (3.3)：f = β(c-a)/c （H. Wu et al., 2025）
-    total_price           <- 公式 (3.4)：p = p_TOU + f
-    waiting_time_minutes  <- 公式 (3.5)：Allen-Cunneen 近似 M/G/k 等待时间
-                              （Zhong et al., 2023）
-"""
-
 import math
 from copy import deepcopy
 from typing import Any, Optional
@@ -43,156 +8,204 @@ class ChargingStation:
 
     def __init__(
         self,
-        station_id: str,
-        mapped_node: int,
-        chargers: dict[str, dict[str, Any]],
-        access_distance_km: float = 0.0,
-        marginal_cost_factor: float = 0.2,
+        num_chargers: list[float],                   # 充电桩数量：[slow, fast]，来自站点物理数据文件
+        power_kw: list[float],                        # 充电功率(kW)：[slow, fast]，来自站点物理数据文件
+        arrival_rate_per_hour: list[list[float]],     # 到达率时刻表：[slow数组, fast数组]，每个数组长度24，第h位是h点的到达率(辆/小时)，直接来自场景配置文件，不再另外计算
+        initial_time: float,                          # 仿真起始时间，由外部传入；reset()会把到达率恢复到这个时间点对应的值，而不是固定回到0点
+        station_id: str,                              # 站点id
+        mapped_node: int,                             # 映射的路网节点
+        access_distance_km: float,                    # 到映射节点的距离(km)
+        mean_service_time_minutes: float,             # 平均服务时间(分钟)，站点级别，不分类型
+        service_time_std_minutes: float,              # 服务时间标准差(分钟)，站点级别，不分类型
+        marginal_cost_factor: float = 0.2,            # 边际成本因子β，全局共享常数，默认0.2（proposal 3.4.2经验取值）
     ) -> None:
-        self.station_id = station_id
-        self.mapped_node = mapped_node
-        self.access_distance_km = access_distance_km
-        self.marginal_cost_factor = marginal_cost_factor
+        # ---- 与充电桩类型无关的参数 ----
+        self.station_id = station_id                      # 站点id
+        self.mapped_node = mapped_node                    # 映射的路网节点
+        self.access_distance_km = access_distance_km      # 到映射节点的距离(km)
+        self.marginal_cost_factor = marginal_cost_factor  # 边际成本因子β，全局共享，不分站点、不分充电桩类型
+        self.mean_service_time_minutes = mean_service_time_minutes  # 平均服务时间(分钟)，站点级别，不分充电桩类型
+        self.service_time_std_minutes = service_time_std_minutes    # 服务时间标准差(分钟)，站点级别，不分充电桩类型
+        self.tou_tariff = 0.0                              # 分时电价，环境信息，来自外部电价表，由StationManager逐time slot注入，构造时先占位
+        self._initial_time = initial_time                  # 仿真起始时间，只在构造和reset()时使用，构造后不应再被外部修改
 
-        # 充电桩的静态配置，按 charger_type 拆成几个字典属性。
-        self.num_chargers = {ct: cfg["num_chargers"] for ct, cfg in chargers.items()}
-        self.power_kw = {ct: cfg["power_kw"] for ct, cfg in chargers.items()}
-        self.arrival_rate_per_hour = {
-            ct: cfg.get("arrival_rate_per_hour", 0.0) for ct, cfg in chargers.items()
-        }
-        self.mean_service_time_minutes = {
-            ct: cfg.get("mean_service_time_minutes", 0.0) for ct, cfg in chargers.items()
-        }
-        self.service_time_std_minutes = {
-            ct: cfg.get("service_time_std_minutes", 0.0) for ct, cfg in chargers.items()
-        }
+        # ---- slow类型充电桩参数 ----
+        self.num_chargers_slow = num_chargers[0]                            # slow充电桩数量
+        self.power_kw_slow = power_kw[0]                                    # slow充电功率(kW)
+        self._arrival_rate_timetable_slow = arrival_rate_per_hour[0]        # slow到达率时刻表，长度24，来自场景配置文件，不随仿真变化
+        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[self._hour_index(initial_time)]  # slow当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
 
-        self.tou_tariff = 0.0
-        self.available_chargers: dict[str, float] = {ct: 0.0 for ct in self.num_chargers}
-        self.dynamic_service_fee: dict[str, float] = {ct: 0.0 for ct in self.num_chargers}
-        self.total_price: dict[str, float] = {ct: 0.0 for ct in self.num_chargers}
-        self.waiting_time_minutes: dict[str, float] = {ct: 0.0 for ct in self.num_chargers}
+        self.available_chargers_slow = 0.0                                  # slow当前空闲桩数，动态量，由_recompute_derived_state()更新
+        self.dynamic_service_fee_slow = 0.0                                 # slow动态服务费，动态量，由_recompute_derived_state()更新
+        self.total_price_slow = 0.0                                         # slow总价，动态量，由_estimate_dynamic_service_fee()更新
+        self.waiting_time_minutes_slow = 0.0                                # slow预计等待时间(分钟)，动态量，由_estimate_waiting_time_minutes()更新
 
-        self._recompute_derived_state()
+        # ---- fast类型充电桩参数 ----
+        self.num_chargers_fast = num_chargers[1]                            # fast充电桩数量
+        self.power_kw_fast = power_kw[1]                                    # fast充电功率(kW)
+        self._arrival_rate_timetable_fast = arrival_rate_per_hour[1]        # fast到达率时刻表，长度24，来自场景配置文件，不随仿真变化
+        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[self._hour_index(initial_time)]  # fast当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
+
+        self.available_chargers_fast = 0.0                                  # fast当前空闲桩数，动态量，由_recompute_derived_state()更新
+        self.dynamic_service_fee_fast = 0.0                                 # fast动态服务费，动态量，由_recompute_derived_state()更新
+        self.total_price_fast = 0.0                                         # fast总价，动态量，由_estimate_dynamic_service_fee()更新
+        self.waiting_time_minutes_fast = 0.0                                # fast预计等待时间(分钟)，动态量，由_estimate_waiting_time_minutes()更新
 
     # ------------------------------------------------------------------
     # 公共接口：reset / step / get_state
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """电价清零，重新计算全部派生量。"""
-        self.tou_tariff = 0.0
-        self._recompute_derived_state()
+        """回到_initial_time这个时刻，并直接调用一次step()完成初始化，因此reset()之后
+        全部动态量都是按_initial_time、tou_tariff=0算出来的真实值，不是占位的0.0。
+        """
+        self.step(current_time=self._initial_time, tou_tariff=0.0)
 
     def step(self, current_time: float, tou_tariff: float = 0.0) -> None:
-        """按当前时间刷新分时电价，并重新计算全部派生量。
+        """按当前分时电价、当前小时对应的到达率刷新，重新计算全部动态量。
 
-        current_time 目前只用来标记这是哪个 time slot；tou_tariff 是分时
-        电价表在这个时间点查出来的值，由调用方（StationManager）传入，
-        因为电价是所有站点共享的一张表，不需要每个站点各自查一遍。
+        current_time按整点取小时、对24取模得到0-23的下标，直接从构造时存好的时刻表里
+        取值，不再做任何计算（时刻表里的数就是最终到达率本身）。
         """
         self.tou_tariff = tou_tariff
+        hour_index = self._hour_index(current_time)
+        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[hour_index]
+        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[hour_index]
         self._recompute_derived_state()
 
     def get_state(self) -> dict[str, Any]:
-        """返回站点状态副本。"""
+        """返回站点的高层静态信息（站点身份、位置、物理配置），不含随时间变化的动态量；
+        动态量（价格、等待时间等）请用下面按充电桩类型查询的几个个性化函数。
+        """
         return {
             "station_id": self.station_id,
             "mapped_node": self.mapped_node,
             "access_distance_km": self.access_distance_km,
-            "marginal_cost_factor": self.marginal_cost_factor,
-            "num_chargers": dict(self.num_chargers),
-            "power_kw": dict(self.power_kw),
-            "arrival_rate_per_hour": dict(self.arrival_rate_per_hour),
-            "mean_service_time_minutes": dict(self.mean_service_time_minutes),
-            "service_time_std_minutes": dict(self.service_time_std_minutes),
-            "tou_tariff": self.tou_tariff,
-            "available_chargers": dict(self.available_chargers),
-            "dynamic_service_fee": dict(self.dynamic_service_fee),
-            "total_price": dict(self.total_price),
-            "waiting_time_minutes": dict(self.waiting_time_minutes),
+            "num_chargers_slow": self.num_chargers_slow,
+            "power_kw_slow": self.power_kw_slow,
+            "num_chargers_fast": self.num_chargers_fast,
+            "power_kw_fast": self.power_kw_fast,
         }
+
+    # ------------------------------------------------------------------
+    # 个性化查询函数
+    # ------------------------------------------------------------------
+
+    def get_charger_type_state(self, charger_type: str) -> dict[str, Any]:
+        """按充电桩类型（"slow"/"fast"）查询该类型当前的total_price和waiting_time_minutes。"""
+        self._validate_charger_type(charger_type)
+        return {
+            "total_price": getattr(self, f"total_price_{charger_type}"),
+            "waiting_time_minutes": getattr(self, f"waiting_time_minutes_{charger_type}"),
+        }
+
+    def get_total_price(self, charger_type: str) -> float:
+        """按充电桩类型（"slow"/"fast"）单独查询当前total_price。"""
+        self._validate_charger_type(charger_type)
+        return getattr(self, f"total_price_{charger_type}")
+
+    def get_waiting_time_minutes(self, charger_type: str) -> float:
+        """按充电桩类型（"slow"/"fast"）单独查询当前waiting_time_minutes。"""
+        self._validate_charger_type(charger_type)
+        return getattr(self, f"waiting_time_minutes_{charger_type}")
 
     # ------------------------------------------------------------------
     # 内部实现（下划线开头，外部代码不应依赖）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _hour_index(current_time: float) -> int:
+        """把任意时刻（允许跨天累计，如第2天9点=33.0）换算成0-23的小时下标，用于查到达率时刻表。
+        构造函数、reset()、step()三处都用这一个函数，避免同样的取整/取模逻辑写三份。
+        """
+        return int(current_time) % 24
+
+    @staticmethod
+    def _validate_charger_type(charger_type: str) -> None:
+        """三个个性化查询函数共用的入参校验，charger_type只能是"slow"或"fast"，否则直接报错。"""
+        if charger_type not in ("slow", "fast"):
+            raise ValueError(f"未知的充电桩类型: {charger_type}，只能是\"slow\"或\"fast\"")
+
     def _recompute_derived_state(self) -> None:
-        for charger_type in self.num_chargers:
-            utilization = self._utilization(charger_type)
-            offered_load = utilization * self.num_chargers[charger_type]
-
-            available = self.num_chargers[charger_type] - offered_load
-            self.available_chargers[charger_type] = available
-
-            fee = self._estimate_dynamic_service_fee(charger_type, available)
-            self.dynamic_service_fee[charger_type] = fee
-            self.total_price[charger_type] = self.tou_tariff + fee
-
-            self.waiting_time_minutes[charger_type] = self._estimate_waiting_time_minutes(
-                charger_type, offered_load
-            )
+        """整体入口：依次为slow、fast两种充电桩类型更新全部动态量，注意更新顺序（available -> fee -> price -> waiting）。"""
+        for charger_type in ("slow", "fast"):
+            self._update_available_chargers(charger_type)
+            self._update_dynamic_service_fee(charger_type)
+            self._update_total_price(charger_type)
+            self._update_waiting_time_minutes(charger_type)
 
     def _utilization(self, charger_type: str) -> float:
-        """标准化利用率 ρ_norm = λ/(kμ) ∈[0,1)，仅用于内部推导 offered_load。"""
-        arrival_rate_per_hour = self.arrival_rate_per_hour[charger_type]
-        mean_service_time_hours = self.mean_service_time_minutes[charger_type] / 60
-        num_chargers = self.num_chargers[charger_type]
+        """标准化利用率 ρ_norm = λ/(kμ) ∈[0,1)，仅供内部推导offered_load使用。"""
+        arrival_rate_per_hour = getattr(self, f"arrival_rate_per_hour_{charger_type}")
+        mean_service_time_hours = self.mean_service_time_minutes / 60  # 分钟转小时，与λ的"每小时"单位对齐
+        num_chargers = getattr(self, f"num_chargers_{charger_type}")
         return arrival_rate_per_hour * mean_service_time_hours / num_chargers
 
-    def _estimate_dynamic_service_fee(self, charger_type: str, available_chargers: float) -> float:
-        """proposal 公式 (3.3)：拥堵敏感服务费 f = β(c-a)/c（H. Wu et al., 2025）。
+    def _offered_load(self, charger_type: str) -> float:
+        """话务强度 ρ = λμ（offered load），量纲与充电桩数相同，供available/waiting两处复用。"""
+        num_chargers = getattr(self, f"num_chargers_{charger_type}")
+        return self._utilization(charger_type) * num_chargers
 
-        c = num_chargers（静态充电桩数），a = available_chargers（当前期望
-        空闲桩数）。可用桩越少（c-a 越大），服务费越高；β 即
-        marginal_cost_factor，默认 0.2。
-        """
-        num_chargers = self.num_chargers[charger_type]
-        return self.marginal_cost_factor * (num_chargers - available_chargers) / num_chargers
+    def _update_available_chargers(self, charger_type: str) -> None:
+        """Little's Law精确式 a = c - ρ，更新对应类型的available_chargers。"""
+        num_chargers = getattr(self, f"num_chargers_{charger_type}")
+        offered_load = self._offered_load(charger_type)
+        setattr(self, f"available_chargers_{charger_type}", num_chargers - offered_load)
 
-    def _estimate_waiting_time_minutes(self, charger_type: str, offered_load: float) -> float:
-        """proposal 公式 (3.5)：Allen-Cunneen 近似的 M/G/k 等待时间，单位：分钟。
+    def _update_dynamic_service_fee(self, charger_type: str) -> None:
+        """proposal公式(3.3) f=β(c-a)/c，更新对应类型的dynamic_service_fee；依赖available_chargers已更新。"""
+        num_chargers = getattr(self, f"num_chargers_{charger_type}")
+        available_chargers = getattr(self, f"available_chargers_{charger_type}")
+        fee = self.marginal_cost_factor * (num_chargers - available_chargers) / num_chargers
+        setattr(self, f"dynamic_service_fee_{charger_type}", fee)
 
-        T_wait = (σ²+μ²) / (2μ(c-ρ)) × [1 + Σ_{h=0}^{c-1} (c-1)!(c-ρ) / (h!·ρ^(c-h-1))]^(-1)
+    def _update_total_price(self, charger_type: str) -> None:
+        """proposal公式(3.4) p=tou_tariff+f，更新对应类型的total_price；依赖dynamic_service_fee已更新。"""
+        fee = getattr(self, f"dynamic_service_fee_{charger_type}")
+        setattr(self, f"total_price_{charger_type}", self.tou_tariff + fee)
 
-        其中 c = num_chargers，ρ = offered_load（即 λ×μ，未除以 c），
-        μ = mean_service_time_minutes，σ = service_time_std_minutes。
-        方括号里的求和项是 Erlang-C 公式的分母，取倒数后就是"需要排队等待"
-        的概率；乘以前面的 (σ²+μ²)/(2μ(c-ρ)) 就是 Allen-Cunneen 对一般服务
-        时间分布（而不是纯指数分布）的修正。
-        """
-        num_chargers = self.num_chargers[charger_type]
-        mean_service_time = self.mean_service_time_minutes[charger_type]
-        service_time_std = self.service_time_std_minutes[charger_type]
+    def _update_waiting_time_minutes(self, charger_type: str) -> None:
+        """proposal公式(3.5) Allen-Cunneen近似M/G/k等待时间，更新对应类型的waiting_time_minutes(分钟)。"""
+        num_chargers = int(getattr(self, f"num_chargers_{charger_type}"))  # factorial/range需要int，文件加载的数量按整数使用
+        mean_service_time = self.mean_service_time_minutes  # μ，站点级别，两种类型共用
+        service_time_std = self.service_time_std_minutes    # σ，站点级别，两种类型共用
+        offered_load = self._offered_load(charger_type)
 
         if offered_load <= 0 or mean_service_time <= 0 or num_chargers <= 0:
-            return 0.0
-        if offered_load >= num_chargers:
-            # 违反稳定性条件 c > ρ（到达率超过服务能力），保守截断避免除零/发散。
-            offered_load = num_chargers - 1e-6
+            waiting_time = 0.0
+        else:
+            if offered_load >= num_chargers:
+                # 违反稳定性条件 c > ρ，保守截断避免除零/发散
+                offered_load = num_chargers - 1e-6
 
-        erlang_c_denominator = 1.0
-        for h in range(num_chargers):
-            erlang_c_denominator += (
-                math.factorial(num_chargers - 1)
-                * (num_chargers - offered_load)
-                / (math.factorial(h) * offered_load ** (num_chargers - h - 1))
+            erlang_c_denominator = 1.0
+            for h in range(num_chargers):
+                erlang_c_denominator += (
+                    math.factorial(num_chargers - 1)
+                    * (num_chargers - offered_load)
+                    / (math.factorial(h) * offered_load ** (num_chargers - h - 1))
+                )
+            probability_of_wait = 1.0 / erlang_c_denominator
+
+            prefactor = (service_time_std**2 + mean_service_time**2) / (
+                2 * mean_service_time * (num_chargers - offered_load)
             )
-        probability_of_wait = 1.0 / erlang_c_denominator
+            waiting_time = prefactor * probability_of_wait
 
-        prefactor = (service_time_std**2 + mean_service_time**2) / (
-            2 * mean_service_time * (num_chargers - offered_load)
-        )
-        return prefactor * probability_of_wait
+        setattr(self, f"waiting_time_minutes_{charger_type}", waiting_time)
 
 
 class StationManager:
-    """站点集合组件；负责把分时电价分发给各站点。"""
+    """站点集合组件"""
 
-    def __init__(self, stations: Optional[list[ChargingStation]] = None) -> None:
-        self._stations: dict[str, ChargingStation] = {}
+    def __init__(self, stations_config: Optional[list[dict[str, Any]]] = None) -> None:
+        # stations_config是站点参数的列表，每一项是一个字典（对应一份JSON式的站点配置，
+        # 字段名要跟ChargingStation.__init__的形参名一一对应），站点对象在这里才真正创建，
+        # 不是外部先建好、这里只做转存。
+        self._stations: dict[str, ChargingStation] = {}  # key为站点id，value为站点对象
 
-        for station in stations or []:
+        for station_config in stations_config or []:
+            station = ChargingStation(**station_config)
             if station.station_id in self._stations:
                 raise ValueError(f"充电站 ID 已存在: {station.station_id}")
 
@@ -203,12 +216,12 @@ class StationManager:
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """重置所有站点。"""
+        """重置re所有站点。"""
         for station in self._stations.values():
             station.reset()
 
     def step(self, current_time: float, tou_tariff: float = 0.0) -> None:
-        """把当前时间和分时电价转发给每个站点，让它们各自刷新派生量。"""
+        """把当前时间和分时电价转发给每个站点，让它们各自按自己的到达率时刻表刷新派生量。"""
         for station in self._stations.values():
             station.step(current_time=current_time, tou_tariff=tou_tariff)
 
