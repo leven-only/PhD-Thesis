@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from sim_env.core_env import EVChargingEnv, EnvConfig
-from sim_env.core_mobility import MobilityManager
+from sim_env.mid_mobility import MobilityManager
 from sim_env.base_road_network import RoadNetwork
 from sim_env.base_station import StationManager
 from sim_env.base_vehicle import Vehicle, VehicleManager
