@@ -1,6 +1,6 @@
 """基础仿真测试使用的默认充电站。"""
 
-from sim_env.core_station import ChargingStation, StationManager
+from sim_env.base_station import ChargingStation, StationManager
 
 
 def build_default_station_manager() -> StationManager:

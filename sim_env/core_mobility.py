@@ -4,8 +4,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from sim_env.core_road_network import RoadNetwork
-from sim_env.core_vehicle import (
+from sim_env.base_road_network import RoadNetwork
+from sim_env.base_vehicle import (
     Vehicle,
     VehicleEvent,
     VehicleManager,

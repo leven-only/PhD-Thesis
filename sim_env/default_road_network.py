@@ -1,6 +1,6 @@
 """基础仿真测试使用的默认路网数据。"""
 
-from sim_env.core_road_network import RoadNetwork
+from sim_env.base_road_network import RoadNetwork
 
 
 # 邻接矩阵：0 表示没有道路，非零值表示道路长度（km）

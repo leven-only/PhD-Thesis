@@ -2,7 +2,7 @@
 from typing import Any
 
 from sim_env.core_env import EVChargingEnv
-from sim_env.core_road_network import RoadNetwork
+from sim_env.base_road_network import RoadNetwork
 import sim_env.default_road_network as default_road_network
 
 def main() -> None:

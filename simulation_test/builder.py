@@ -5,9 +5,9 @@ from typing import Optional
 
 from sim_env.core_env import EVChargingEnv, EnvConfig
 from sim_env.core_mobility import MobilityManager
-from sim_env.core_road_network import RoadNetwork
-from sim_env.core_station import StationManager
-from sim_env.core_vehicle import Vehicle, VehicleManager
+from sim_env.base_road_network import RoadNetwork
+from sim_env.base_station import StationManager
+from sim_env.base_vehicle import Vehicle, VehicleManager
 from sim_env.default_road_network import build_default_road_network
 from sim_env.default_stations import build_default_station_manager
 
