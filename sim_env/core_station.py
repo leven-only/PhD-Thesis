@@ -243,7 +243,7 @@ class StationManager:
     # ------------------------------------------------------------------
 
     def get_station(self, station_id: str) -> ChargingStation:
-        """查询一个站点并返回副本。"""
+        """查询一个站点并返回副本，仅用于查询"""
         if station_id not in self._stations:
             raise ValueError(f"充电站不存在: {station_id}")
         return deepcopy(self._stations[station_id])
