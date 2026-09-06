@@ -11,45 +11,47 @@ class ChargingStation:
         num_chargers: list[float],                   # 充电桩数量：[slow, fast]，来自站点物理数据文件
         power_kw: list[float],                        # 充电功率(kW)：[slow, fast]，来自站点物理数据文件
         arrival_rate_per_hour: list[list[float]],     # 到达率时刻表：[slow数组, fast数组]，每个数组长度24，第h位是h点的到达率(辆/小时)，直接来自场景配置文件，不再另外计算
-        initial_time: float,                          # 仿真起始时间，由外部传入；reset()会把到达率恢复到这个时间点对应的值，而不是固定回到0点
+        initial_time: float,                          # 仿真起始时间，由外部传入；reset()会以这个时间点重新初始化全部动态量，而不是固定回到0点
         station_id: str,                              # 站点id
         mapped_node: int,                             # 映射的路网节点
         access_distance_km: float,                    # 到映射节点的距离(km)
-        mean_service_time_minutes: float,             # 平均服务时间(分钟)，站点级别，不分类型
-        service_time_std_minutes: float,              # 服务时间标准差(分钟)，站点级别，不分类型
+        mean_service_time_minutes: list[float],       # 平均服务时间(分钟)：[slow, fast]，与num_chargers/power_kw同样按充电桩类型区分，不再是站点级别共用值
+        service_time_std_minutes: list[float],        # 服务时间标准差(分钟)：[slow, fast]，与num_chargers/power_kw同样按充电桩类型区分，不再是站点级别共用值
         marginal_cost_factor: float = 0.2,            # 边际成本因子β，全局共享常数，默认0.2（proposal 3.4.2经验取值）
     ) -> None:
         # ---- 与充电桩类型无关的参数 ----
         self.station_id = station_id                      # 站点id
         self.mapped_node = mapped_node                    # 映射的路网节点
         self.access_distance_km = access_distance_km      # 到映射节点的距离(km)
-        self.marginal_cost_factor = marginal_cost_factor  # 边际成本因子β，全局共享，不分站点、不分充电桩类型
-        self.mean_service_time_minutes = mean_service_time_minutes  # 平均服务时间(分钟)，站点级别，不分充电桩类型
-        self.service_time_std_minutes = service_time_std_minutes    # 服务时间标准差(分钟)，站点级别，不分充电桩类型
+        self.marginal_cost_factor = marginal_cost_factor  # 边际成本因子β=0.2，全局共享，不分站点、不分充电桩类型
         self.tou_tariff = 0.0                              # 分时电价，环境信息，来自外部电价表，由StationManager逐time slot注入，构造时先占位
         self._initial_time = initial_time                  # 仿真起始时间，只在构造和reset()时使用，构造后不应再被外部修改
 
         # ---- slow类型充电桩参数 ----
         self.num_chargers_slow = num_chargers[0]                            # slow充电桩数量
         self.power_kw_slow = power_kw[0]                                    # slow充电功率(kW)
+        self.mean_service_time_minutes_slow = mean_service_time_minutes[0]  # slow平均服务时间(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
+        self.service_time_std_minutes_slow = service_time_std_minutes[0]    # slow服务时间标准差(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self._arrival_rate_timetable_slow = arrival_rate_per_hour[0]        # slow到达率时刻表，长度24，来自场景配置文件，不随仿真变化
         self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[self._hour_index(initial_time)]  # slow当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
 
         self.available_chargers_slow = 0.0                                  # slow当前空闲桩数，动态量，由_recompute_derived_state()更新
         self.dynamic_service_fee_slow = 0.0                                 # slow动态服务费，动态量，由_recompute_derived_state()更新
-        self.total_price_slow = 0.0                                         # slow总价，动态量，由_estimate_dynamic_service_fee()更新
-        self.waiting_time_minutes_slow = 0.0                                # slow预计等待时间(分钟)，动态量，由_estimate_waiting_time_minutes()更新
+        self.total_price_slow = 0.0                                         # slow总价，动态量，由_recompute_derived_state()更新
+        self.waiting_time_minutes_slow = 0.0                                # slow预计等待时间(分钟)，动态量，由_recompute_derived_state()更新
 
         # ---- fast类型充电桩参数 ----
         self.num_chargers_fast = num_chargers[1]                            # fast充电桩数量
         self.power_kw_fast = power_kw[1]                                    # fast充电功率(kW)
+        self.mean_service_time_minutes_fast = mean_service_time_minutes[1]  # fast平均服务时间(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
+        self.service_time_std_minutes_fast = service_time_std_minutes[1]    # fast服务时间标准差(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self._arrival_rate_timetable_fast = arrival_rate_per_hour[1]        # fast到达率时刻表，长度24，来自场景配置文件，不随仿真变化
         self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[self._hour_index(initial_time)]  # fast当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
 
         self.available_chargers_fast = 0.0                                  # fast当前空闲桩数，动态量，由_recompute_derived_state()更新
         self.dynamic_service_fee_fast = 0.0                                 # fast动态服务费，动态量，由_recompute_derived_state()更新
-        self.total_price_fast = 0.0                                         # fast总价，动态量，由_estimate_dynamic_service_fee()更新
-        self.waiting_time_minutes_fast = 0.0                                # fast预计等待时间(分钟)，动态量，由_estimate_waiting_time_minutes()更新
+        self.total_price_fast = 0.0                                         # fast总价，动态量，由_recompute_derived_state()更新
+        self.waiting_time_minutes_fast = 0.0                                # fast预计等待时间(分钟)，动态量，由_recompute_derived_state()更新
 
     # ------------------------------------------------------------------
     # 公共接口：reset / step / get_state
@@ -137,7 +139,8 @@ class ChargingStation:
     def _utilization(self, charger_type: str) -> float:
         """标准化利用率 ρ_norm = λ/(kμ) ∈[0,1)，仅供内部推导offered_load使用。"""
         arrival_rate_per_hour = getattr(self, f"arrival_rate_per_hour_{charger_type}")
-        mean_service_time_hours = self.mean_service_time_minutes / 60  # 分钟转小时，与λ的"每小时"单位对齐
+        mean_service_time_minutes = getattr(self, f"mean_service_time_minutes_{charger_type}")  # 按充电桩类型取对应的平均服务时间，不再是站点级别共用值
+        mean_service_time_hours = mean_service_time_minutes / 60  # 分钟转小时，与λ的"每小时"单位对齐
         num_chargers = getattr(self, f"num_chargers_{charger_type}")
         return arrival_rate_per_hour * mean_service_time_hours / num_chargers
 
@@ -167,8 +170,8 @@ class ChargingStation:
     def _update_waiting_time_minutes(self, charger_type: str) -> None:
         """proposal公式(3.5) Allen-Cunneen近似M/G/k等待时间，更新对应类型的waiting_time_minutes(分钟)。"""
         num_chargers = int(getattr(self, f"num_chargers_{charger_type}"))  # factorial/range需要int，文件加载的数量按整数使用
-        mean_service_time = self.mean_service_time_minutes  # μ，站点级别，两种类型共用
-        service_time_std = self.service_time_std_minutes    # σ，站点级别，两种类型共用
+        mean_service_time = getattr(self, f"mean_service_time_minutes_{charger_type}")  # μ，按充电桩类型取值，不再是站点级别共用
+        service_time_std = getattr(self, f"service_time_std_minutes_{charger_type}")    # σ，按充电桩类型取值，不再是站点级别共用
         offered_load = self._offered_load(charger_type)
 
         if offered_load <= 0 or mean_service_time <= 0 or num_chargers <= 0:
@@ -216,7 +219,7 @@ class StationManager:
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """重置re所有站点。"""
+        """重置所有站点。"""
         for station in self._stations.values():
             station.reset()
 
