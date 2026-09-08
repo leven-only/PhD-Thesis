@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Optional
 
 from sim_env.base_road_network import RoadNetwork
-from sim_env.base_vehicle import Vehicle, VehicleStatus
+from sim_env.base_vehicle import Vehicle
 
 
 class MobilityManager:
@@ -98,17 +98,19 @@ class MobilityManager:
             remaining_time = remaining_time - step_time
             self.path_progress = self.path_progress + step_distance
 
+            # 这一步正好把整条路径走完了：不管预算是不是也刚好同时用完，都直接
+            # 结束（不能只靠"下一轮循环开头"才发现走完了——如果这一步恰好把
+            # remaining_time也耗到0，while条件就不成立，不会再进入下一轮循环，
+            # finished_flag就会一直停在0，要等外部再调用一次step()才会被发现）
+            if self.path_progress >= total_length_km - 1e-9:
+                finished_flag = 1
+                break
+
             if step_distance < edge_remaining_km - 1e-9:
                 break  # 这条边没走完，说明这一步的时间预算已经用光了
             # 否则这条边刚好走完了，继续下一轮循环，用剩下的时间接着走下一条边
 
         current_node_id, next_node_id, edge_progress_km = self._current_position()
-
-        # 这一步只要真的动了，就报DRIVING；是不是真的到终点，交给上层（Env）判断
-        if distance_km > 0:
-            move_status = VehicleStatus.DRIVING
-        else:
-            move_status = None
 
         self.vehicle.step(
             action="move",
@@ -118,7 +120,6 @@ class MobilityManager:
                 "current_node_id": current_node_id,
                 "next_node_id": next_node_id,
                 "edge_progress_km": edge_progress_km,
-                "status": move_status,
             },
         )
 

@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from sim_env.base_road_network import RoadNetwork
 from sim_env.base_station import StationManager, ChargingStation
-from sim_env.base_vehicle import Vehicle, VehicleStatus
+from sim_env.base_vehicle import Vehicle
 from sim_env.mid_mobility import MobilityManager
 
 
@@ -175,16 +175,6 @@ class EVChargingEnv:
                 available_time = self.time_step - elapsed_in_tick
 
                 finished_flag, time_used = self.mobility.step(available_time=available_time)
-
-                if finished_flag == 1:
-                    # 方案在这一步之内走完了：是不是真到终点，由Env根据目的地判断
-                    at_destination = self.vehicle.current_node_id == self.vehicle.destination_node_id
-                    self.vehicle.step(
-                        action="set_status",
-                        params={
-                            "status": VehicleStatus.FINISHED if at_destination else VehicleStatus.IDLE,
-                        },
-                    )
 
                 self.current_time += time_used
 

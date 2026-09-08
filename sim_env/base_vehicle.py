@@ -59,7 +59,6 @@ class Vehicle:
         self.next_node_id = next_node_id                    # 下一个目标节点；车辆正在某条边上行驶时才有意义
         self.edge_progress_km = edge_progress_km            # 在current_node_id->next_node_id这条边上已经走过的距离(km)
         self.soc = soc                                      # 当前电量(SOC比例)
-        self.status = VehicleStatus.IDLE                    # 当前状态
 
         # ---- 累积记录（仿真过程中只增不减的统计量；reset()时清零，回到构造完成时的初始值）----
         self.total_distance_km = 0.0                  # 累计行驶里程(km)
@@ -83,9 +82,9 @@ class Vehicle:
 
     def step(self, action: str, params: Optional[dict[str, Any]] = None) -> None:
         """根据action类型，把params转发给对应的方法，由step()统一负责判断
-        "这一步到底是移动、充电、还是纯状态切换"，调用方（外部负责算物理结果
-        的组件，比如替代Mobility的那个组件、Station）不需要自己决定该调用
-        move()还是charge()，只要把算好的结果连同action标签一起传进来即可。
+        "这一步到底是移动还是充电"，调用方（外部负责算物理结果的组件，比如
+        替代Mobility的那个组件、Station）不需要自己决定该调用move()还是
+        charge()，只要把算好的结果连同action标签一起传进来即可。
 
         不看current_time/time_step：车辆自己不关心"现在几点"，那是路网/站点
         这类"世界状态"组件的职责；车辆只关心"这一步外部告诉我发生了什么"，
@@ -97,17 +96,13 @@ class Vehicle:
             self.move(**params)
         elif action == "charge":
             self.charge(**params)
-        elif action == "set_status":
-            # 纯状态切换（比如从DRIVING变成QUEUEING），不伴随移动或充电，
-            # 所以不适合塞进move()/charge()里，单独给一个分支。
-            self.status = VehicleStatus(params["status"])
         else:
-            raise ValueError(f"未知动作类型: {action}，只能是\"move\"/\"charge\"/\"set_status\"")
+            raise ValueError(f"未知动作类型: {action}，只能是\"move\"/\"charge\"")
 
     def get_state(self) -> dict[str, Any]:
         """返回车辆的静态属性 + 累积记录：车辆本身固定不变的身份/物理信息，
         加上整个仿真过程里的统计结果。不含需求属性（这次行程的参数，见
-        get_demand_info()）和动态属性（当前位置/电量/状态，见get_dynamic_state()）。
+        get_demand_info()）和动态属性（当前位置/电量，见get_dynamic_state()）。
         """
         return {
             "vehicle_id": self.vehicle_id,
@@ -148,13 +143,12 @@ class Vehicle:
     # ------------------------------------------------------------------
 
     def get_dynamic_state(self) -> dict[str, Any]:
-        """查询车辆当前的动态属性：位置、电量、状态。"""
+        """查询车辆当前的动态属性：位置、电量。"""
         return {
             "current_node_id": self.current_node_id,
             "next_node_id": self.next_node_id,
             "edge_progress_km": self.edge_progress_km,
             "soc": self.soc,
-            "status": self.status.value,
         }
 
     # ------------------------------------------------------------------
@@ -168,7 +162,6 @@ class Vehicle:
         current_node_id: Optional[int] = None,
         next_node_id: Optional[int] = None,
         edge_progress_km: Optional[float] = None,
-        status: Optional[VehicleStatus] = None,
     ) -> None:
         """应用一步移动结果：更新位置和里程，并按车辆自己的能耗模型扣电。
 
@@ -185,8 +178,6 @@ class Vehicle:
             self.next_node_id = next_node_id
         if edge_progress_km is not None:
             self.edge_progress_km = edge_progress_km
-        if status is not None:
-            self.status = VehicleStatus(status)
 
         if distance_km > 0:
             self._consume_energy(distance_km)
@@ -195,7 +186,6 @@ class Vehicle:
         self,
         energy_kwh: float = 0.0,
         cost: float = 0.0,
-        status: Optional[VehicleStatus] = None,
     ) -> None:
         """应用一步充电结果：按充入的电量增加SOC、累计花费。
 
@@ -208,8 +198,6 @@ class Vehicle:
 
         if self.battery_capacity_kwh > 0:
             self.soc = min(self.soc + energy_kwh / self.battery_capacity_kwh, 1.0)
-        if status is not None:
-            self.status = VehicleStatus(status)
 
     # ------------------------------------------------------------------
     # 内部实现（下划线开头，外部代码不应依赖）
@@ -240,7 +228,6 @@ class Vehicle:
             "next_node_id": self.next_node_id,
             "edge_progress_km": self.edge_progress_km,
             "soc": self.soc,
-            "status": self.status,
             "total_distance_km": self.total_distance_km,
             "total_energy_used_kwh": self.total_energy_used_kwh,
             "total_energy_charged_kwh": self.total_energy_charged_kwh,
