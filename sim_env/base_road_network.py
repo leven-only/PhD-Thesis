@@ -9,13 +9,13 @@ class RoadNetwork:
         self,
         matrix,
         speed_matrix: Any,
-        speed_timetable: Any,
-        start_time: float,
+        speed_timetable: Any,  # 单位：分钟，与 start_time/current_time 保持一致
+        start_time: float,  # 单位：分钟
     ) -> None:
         self.matrix = matrix    # 路网矩阵，0表示不连接，1表示连接
         self.speed_matrix = speed_matrix    # 速度矩阵：每行代表一个速度的snapshot
-        self.speed_timetable = speed_timetable  # 时间戳数组，元素数量与speed_matrix 行数相同，每个元素代表当时的时间
-        self.start_time = start_time    # 场景开始时间
+        self.speed_timetable = speed_timetable  # 时间戳数组（单位：分钟），元素数量与speed_matrix 行数相同，每个元素代表当时的时间
+        self.start_time = start_time    # 场景开始时间，单位：分钟
 
         self.node_count = len(self.matrix)  # 节点数量
         self.graph = None  # 有向图对象：路网的核心数据结构，节点为路网节点，边为道路及其属性（edge_id/length_km/speed_kph/travel_time_seconds），由 _initialize_network() 构建

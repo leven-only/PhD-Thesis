@@ -2,7 +2,6 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, Optional
 
-
 class VehicleStatus(str, Enum):
     """车辆状态。"""
 
@@ -35,18 +34,12 @@ class Vehicle:
         origin_node_id: int,
         destination_node_id: int,
         target_soc: float = 0.8,
-        time_window_minutes: Optional[float] = None,
+        time_window_minutes: Optional[float] = None,  # 单位：分钟
         energy_consumption_kwh_per_km: float = 0.18,
         current_node_id: Optional[int] = None,
         next_node_id: Optional[int] = None,
         edge_progress_km: float = 0.0,
-        soc: float = 1.0,
-        status: VehicleStatus = VehicleStatus.IDLE,
-        total_distance_km: float = 0.0,
-        total_energy_used_kwh: float = 0.0,
-        total_energy_charged_kwh: float = 0.0,
-        total_travel_time: float = 0.0,
-        total_cost: float = 0.0,
+        soc: float,
     ) -> None:
         # ---- 静态属性（车辆物理属性，一旦创建就不再变化）----
         self.vehicle_id = vehicle_id                        # 车辆id，必填，没有合理默认值
@@ -66,14 +59,14 @@ class Vehicle:
         self.next_node_id = next_node_id                    # 下一个目标节点；车辆正在某条边上行驶时才有意义
         self.edge_progress_km = edge_progress_km            # 在current_node_id->next_node_id这条边上已经走过的距离(km)
         self.soc = soc                                      # 当前电量(SOC比例)
-        self.status = status                                # 当前状态
+        self.status = VehicleStatus.IDLE                    # 当前状态
 
         # ---- 累积记录（仿真过程中只增不减的统计量；reset()时清零，回到构造完成时的初始值）----
-        self.total_distance_km = total_distance_km                  # 累计行驶里程(km)
-        self.total_energy_used_kwh = total_energy_used_kwh          # 累计耗电量(kWh)
-        self.total_energy_charged_kwh = total_energy_charged_kwh    # 累计充入电量(kWh)
-        self.total_travel_time = total_travel_time                  # 累计行驶时间
-        self.total_cost = total_cost                                # 累计花费
+        self.total_distance_km = 0.0                  # 累计行驶里程(km)
+        self.total_energy_used_kwh = 0.0          # 累计耗电量(kWh)
+        self.total_energy_charged_kwh = 0.0    # 累计充入电量(kWh)
+        self.total_travel_time = 0.0                  # 累计行驶时间，分钟
+        self.total_cost = 0.0                                # 累计花费
 
         # 构造完成后对全部字段（不止get_state()暴露的那几个）做一次完整快照，
         # 供reset()还原成"创建对象时的状态"用。
@@ -255,71 +248,3 @@ class Vehicle:
             "total_cost": self.total_cost,
         }
 
-
-class VehicleManager:
-    """车辆集合组件；负责驱动车辆reset/step。"""
-
-    def __init__(self, vehicles_config: Optional[list[dict[str, Any]]] = None) -> None:
-        # 跟StationManager一样：接收JSON式的车辆参数列表，在这里用Vehicle(**vehicle_config)
-        # 真正创建车辆对象，不接收外部预先建好的Vehicle对象。
-        self._vehicles: dict[str, Vehicle] = {}  # key为车辆id，value为车辆对象
-
-        for vehicle_config in vehicles_config or []:
-            vehicle = Vehicle(**vehicle_config)
-            if vehicle.vehicle_id in self._vehicles:
-                raise ValueError(f"车辆 ID 已存在: {vehicle.vehicle_id}")
-
-            self._vehicles[vehicle.vehicle_id] = vehicle
-
-    # ------------------------------------------------------------------
-    # 反应式组件接口：reset / step / get_state
-    # ------------------------------------------------------------------
-
-    def reset(self) -> None:
-        """重置所有车辆。"""
-        for vehicle in self._vehicles.values():
-            vehicle.reset()
-
-    def step(self, actions: Optional[dict[str, dict[str, Any]]] = None) -> None:
-        """把每辆车对应的动作转发给它自己的step()。
-
-        actions的key是vehicle_id，value是形如{"action": "move"/"charge"/"set_status",
-        "params": {...}}的一份指令；具体由谁（替代Mobility的组件、Station等）算出
-        这份指令，VehicleManager这里只按vehicle_id分发，不关心指令内容本身。
-        """
-        for vehicle_id, action_payload in (actions or {}).items():
-            vehicle = self._vehicles.get(vehicle_id)
-            if vehicle is None:
-                raise ValueError(f"车辆不存在: {vehicle_id}")
-
-            # 不用**action_payload这种字典解包的写法，改成显式取key，
-            # 这样如果调用方漏传"action"，报错会直接是KeyError加上明确的
-            # 提示信息，而不是step()那边比较生硬的"缺少参数"报错，读代码
-            # 的人也能一眼看出action_payload里到底要有哪几个key。
-            action = action_payload["action"]
-            params = action_payload.get("params")
-            vehicle.step(action=action, params=params)
-
-    def get_state(self) -> dict[str, Any]:
-        """返回车辆集合状态。"""
-        status_counts: dict[str, int] = {}
-        for vehicle in self._vehicles.values():
-            status = vehicle.status.value
-            status_counts[status] = status_counts.get(status, 0) + 1
-
-        return {
-            "vehicle_count": len(self._vehicles),
-            "status_counts": status_counts,
-            "vehicles": {
-                vehicle_id: vehicle.get_state()
-                for vehicle_id, vehicle in self._vehicles.items()
-            },
-        }
-
-    # ------------------------------------------------------------------
-    # 个性化查询接口
-    # ------------------------------------------------------------------
-
-    def get_vehicle(self, vehicle_id: str) -> Vehicle:
-        """查询一个车辆并返回副本，仅用于查询"""
-        return deepcopy(self._vehicles[vehicle_id])

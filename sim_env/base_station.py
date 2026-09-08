@@ -1,4 +1,5 @@
 import math
+from bisect import bisect_right
 from copy import deepcopy
 from typing import Any, Optional
 
@@ -10,8 +11,11 @@ class ChargingStation:
         self,
         num_chargers: list[float],                   # 充电桩数量：[slow, fast]，来自站点物理数据文件
         power_kw: list[float],                        # 充电功率(kW)：[slow, fast]，来自站点物理数据文件
-        arrival_rate_per_hour: list[list[float]],     # 到达率时刻表：[slow数组, fast数组]，每个数组长度24，第h位是h点的到达率(辆/小时)，直接来自场景配置文件，不再另外计算
-        initial_time: float,                          # 仿真起始时间，由外部传入；reset()会以这个时间点重新初始化全部动态量，而不是固定回到0点
+        arrival_rate_per_hour: list[list[float]],     # 到达率数值本身：[slow数组, fast数组]，每个数组长度24，第h位是"第h个整点小时"
+                                                       # 对应的到达率(辆/小时)，数值含义不变；这24个值对应的是哪个时间段，由
+                                                       # _minute_index() 用分钟时刻表查表决定，不再是"数组下标本身就是小时数"
+        initial_time: float,                          # 单位：分钟（跟整个仿真环境的时钟单位统一）。内部通过
+                                                       # _minute_index() 按分钟时刻表查到达率，不再要求外部先换算成小时
         station_id: str,                              # 站点id
         mapped_node: int,                             # 映射的路网节点
         access_distance_km: float,                    # 到映射节点的距离(km)
@@ -33,7 +37,7 @@ class ChargingStation:
         self.mean_service_time_minutes_slow = mean_service_time_minutes[0]  # slow平均服务时间(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self.service_time_std_minutes_slow = service_time_std_minutes[0]    # slow服务时间标准差(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self._arrival_rate_timetable_slow = arrival_rate_per_hour[0]        # slow到达率时刻表，长度24，来自场景配置文件，不随仿真变化
-        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[self._hour_index(initial_time)]  # slow当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
+        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[self._minute_index(initial_time)]  # slow当前生效到达率，构造时取initial_time对应时段的值，由step()按current_time更新
 
         self.available_chargers_slow = 0.0                                  # slow当前空闲桩数，动态量，由_recompute_derived_state()更新
         self.dynamic_service_fee_slow = 0.0                                 # slow动态服务费，动态量，由_recompute_derived_state()更新
@@ -46,7 +50,7 @@ class ChargingStation:
         self.mean_service_time_minutes_fast = mean_service_time_minutes[1]  # fast平均服务时间(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self.service_time_std_minutes_fast = service_time_std_minutes[1]    # fast服务时间标准差(分钟)，与num_chargers/power_kw同样按类型拆分，来自站点物理数据文件，不随仿真变化
         self._arrival_rate_timetable_fast = arrival_rate_per_hour[1]        # fast到达率时刻表，长度24，来自场景配置文件，不随仿真变化
-        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[self._hour_index(initial_time)]  # fast当前生效到达率，构造时取initial_time对应小时的值，由step()按current_time更新
+        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[self._minute_index(initial_time)]  # fast当前生效到达率，构造时取initial_time对应时段的值，由step()按current_time更新
 
         self.available_chargers_fast = 0.0                                  # fast当前空闲桩数，动态量，由_recompute_derived_state()更新
         self.dynamic_service_fee_fast = 0.0                                 # fast动态服务费，动态量，由_recompute_derived_state()更新
@@ -64,15 +68,16 @@ class ChargingStation:
         self.step(current_time=self._initial_time, tou_tariff=0.0)
 
     def step(self, current_time: float, tou_tariff: float = 0.0) -> None:
-        """按当前分时电价、当前小时对应的到达率刷新，重新计算全部动态量。
+        """按当前分时电价、当前时段对应的到达率刷新，重新计算全部动态量。
 
-        current_time按整点取小时、对24取模得到0-23的下标，直接从构造时存好的时刻表里
-        取值，不再做任何计算（时刻表里的数就是最终到达率本身）。
+        current_time 单位是分钟，按 _minute_index() 查到分钟时刻表里对应的下标，
+        直接从构造时存好的时刻表里取值，不再做任何计算（时刻表里的数就是最终
+        到达率本身）。
         """
         self.tou_tariff = tou_tariff
-        hour_index = self._hour_index(current_time)
-        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[hour_index]
-        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[hour_index]
+        minute_index = self._minute_index(current_time)
+        self.arrival_rate_per_hour_slow = self._arrival_rate_timetable_slow[minute_index]
+        self.arrival_rate_per_hour_fast = self._arrival_rate_timetable_fast[minute_index]
         self._recompute_derived_state()
 
     def get_state(self) -> dict[str, Any]:
@@ -115,12 +120,32 @@ class ChargingStation:
     # 内部实现（下划线开头，外部代码不应依赖）
     # ------------------------------------------------------------------
 
+    # 到达率时刻表的24个分段边界（单位：分钟），对应0点、1点……23点整点时刻，
+    # 是固定的全局常量（24个整点小时均匀切分一天），不需要外部传入配置——如果
+    # 以后需要不均匀的分段，再考虑把它改成构造参数。跟 RoadNetwork.speed_timetable
+    # 是同一种"时刻表 + bisect查找"的写法，_minute_index() 就是这里的
+    # _system_time2speed_index() 对应版本。
+    _ARRIVAL_RATE_TIMETABLE_MINUTES = [hour * 60 for hour in range(24)]  # [0, 60, 120, ..., 1380]
+
     @staticmethod
-    def _hour_index(current_time: float) -> int:
-        """把任意时刻（允许跨天累计，如第2天9点=33.0）换算成0-23的小时下标，用于查到达率时刻表。
-        构造函数、reset()、step()三处都用这一个函数，避免同样的取整/取模逻辑写三份。
+    def _minute_index(current_time: float) -> int:
+        """把任意时刻（单位：分钟，允许跨天累计，如第2天9点=1980.0）换算成到达率
+        时刻表（_ARRIVAL_RATE_TIMETABLE_MINUTES）里对应的下标，用于查到达率。
+
+        做法：先用 current_time % 1440 把跨天的时刻折算回"一天以内的第几分钟"
+        （1440=一天的分钟数），再用 bisect_right 在24个整点边界里找到当前时刻
+        落在哪一段，取这一段的左端点下标——这跟 RoadNetwork 里
+        _system_time2speed_index() 用 speed_timetable 做 bisect 查找是同一个
+        套路，只是这里的时刻表是固定的24个整点小时，不是外部传入的任意时刻表。
+
+        构造函数、reset()（通过 step()）、step() 三处都用这一个函数，避免同样
+        的取模/查表逻辑写三份。
         """
-        return int(current_time) % 24
+        time_of_day_minutes = current_time % 1440.0
+        return max(
+            bisect_right(ChargingStation._ARRIVAL_RATE_TIMETABLE_MINUTES, time_of_day_minutes) - 1,
+            0,
+        )
 
     @staticmethod
     def _validate_charger_type(charger_type: str) -> None:
@@ -201,14 +226,35 @@ class ChargingStation:
 class StationManager:
     """站点集合组件"""
 
-    def __init__(self, stations_config: Optional[list[dict[str, Any]]] = None) -> None:
-        # stations_config是站点参数的列表，每一项是一个字典（对应一份JSON式的站点配置，
-        # 字段名要跟ChargingStation.__init__的形参名一一对应），站点对象在这里才真正创建，
-        # 不是外部先建好、这里只做转存。
+    def __init__(
+        self,
+        stations_config: Optional[list[dict[str, Any]]] = None,
+        initial_time: float = 0.0,  # 单位：分钟，跟 Env 自己的时钟统一，由这里统一分发给
+                                     # 每一个站点，保证所有站点起点时间一致；不需要（也不
+                                     # 应该）由外部在每份 station_config 里各自塞一份。
+    ) -> None:
+        # stations_config是站点参数的列表，每一项是一个字典（对应一份JSON式的站点配置），
+        # 字段名要跟下面显式列出的这些 keyword 一一对应；这份字典本身不需要包含
+        # initial_time——它是上面单独的构造参数，统一注入给每个站点。
+        # 站点对象在这里才真正创建，不是外部先建好、这里只做转存。
         self._stations: dict[str, ChargingStation] = {}  # key为站点id，value为站点对象
 
         for station_config in stations_config or []:
-            station = ChargingStation(**station_config)
+            # 不用 ChargingStation(**station_config) 这种解构调用——那样字段对不对得上
+            # 全靠字典里的 key 名字，出错了也不容易一眼看出来。这里显式把每个字段单独
+            # 取出来再传，虽然啰嗦，但哪个字段对应哪个形参一目了然。
+            station = ChargingStation(
+                num_chargers=station_config["num_chargers"],
+                power_kw=station_config["power_kw"],
+                arrival_rate_per_hour=station_config["arrival_rate_per_hour"],
+                initial_time=initial_time,
+                station_id=station_config["station_id"],
+                mapped_node=station_config["mapped_node"],
+                access_distance_km=station_config["access_distance_km"],
+                mean_service_time_minutes=station_config["mean_service_time_minutes"],
+                service_time_std_minutes=station_config["service_time_std_minutes"],
+                marginal_cost_factor=station_config.get("marginal_cost_factor", 0.2),
+            )
             if station.station_id in self._stations:
                 raise ValueError(f"充电站 ID 已存在: {station.station_id}")
 
