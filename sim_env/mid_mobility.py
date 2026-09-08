@@ -1,269 +1,159 @@
-"""移动组件，负责执行路径计划、算出车辆移动结果，并直接写回车辆。
+"""MobilityManager：负责推进车辆沿着出行方案（节点路径）移动。"""
 
-单车化重构（2026-09-08）：不再通过 VehicleManager 按 vehicle_id 索引多辆车，
-构造时直接持有唯一的 Vehicle 对象；相应地，路径计划/移动结果也从"按
-vehicle_id 建字典"简化成"只有一份"。
-"""
-
+from bisect import bisect_right
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from sim_env.base_road_network import RoadNetwork
 from sim_env.base_vehicle import Vehicle, VehicleStatus
 
 
-@dataclass
-class MobilityPlan:
-    """车辆正在执行的路径计划（单车场景下全局只会有一份，或没有）。"""
-
-    path: list[int]
-    next_node_index: int = 1
-    current_edge_remaining_km: Optional[float] = None
-
-
-@dataclass
-class MovementResult:
-    """一次 step() 中的移动计算结果。"""
-
-    distance_km: float = 0.0
-    travel_time: float = 0.0
-    current_node_id: Optional[int] = None  # 这一步结束时，最后完全到达的节点
-    next_node_id: Optional[int] = None     # 这一步结束时，正朝向的下一个节点（可能还没到）
-    edge_progress_km: float = 0.0          # 在current_node_id->next_node_id这条边上已经走了多远
-    status: Optional[VehicleStatus] = None
-    remove_plan: bool = False
-
-
-@dataclass
-class MobilityStepResult:
-    """step() 的返回值，供 Env 决定这一步时钟该走多久：
-    车辆状态如果变了（比如到达终点/没电/开始行驶），time_used 就是这一步
-    实际消耗的时间；状态没变（比如本来就在DRIVING、这一步继续开、没有
-    提前结束），time_used 就是完整的 time_step（Env 侧其实不看这个值，
-    因为按下面 status_changed=False 分支会直接用 self.time_step，但
-    这里仍然填一个真实值，避免调用方误用出错）。
-    """
-
-    status_changed: bool = False
-    time_used: float = 0.0
-
-
 class MobilityManager:
-    """
-    只负责计算"这一步车辆移动了多少"，并把结果直接应用到车辆上。
+    def __init__(self, road_network: RoadNetwork, vehicle: Vehicle) -> None:
+        """绑定road_network和vehicle，方案相关的属性先初始化为空，等外部再下发方案。"""
+        self.road_network = road_network  # 路网组件，查边长/限速用
+        self.vehicle = vehicle            # 车辆对象，读写车辆的位置/电量/状态用
 
-    单车场景：构造时直接接收唯一的 Vehicle 对象，不再需要 VehicleManager
-    做按 vehicle_id 的索引/转发。
-    """
+        self.path: Optional[list[int]] = None  # 出行方案：节点id组成的路径，没有方案时是None
+        self.milestones: list[float] = []      # 里程碑表：milestones[i]是从起点走到path[i]的累计公里数
+        self.path_progress: float = 0.0        # 沿着path已经累计走了多少公里
 
-    def __init__(
-        self,
-        road_network: RoadNetwork,
-        vehicle: Vehicle,
-    ) -> None:
-        self.road_network = road_network
-        self.vehicle = vehicle
-        self._active_plan: Optional[MobilityPlan] = None
-
-    # ------------------------------------------------------------------
-    # 反应式组件接口：reset / step / get_state
-    # ------------------------------------------------------------------
+        # 构造完成时的初始值快照，供reset()还原用
+        self.initial_state = {
+            "path": self.path,
+            "milestones": self.milestones,
+            "path_progress": self.path_progress,
+        }
 
     def reset(self) -> None:
-        """清空当前路径计划。"""
-        self._active_plan = None
+        """把方案相关的属性都还原成构造完成时的初始值（清空当前方案）。"""
+        for name, value in self.initial_state.items():
+            setattr(self, name, deepcopy(value))
 
-    def step(self, time_step: float, action: Optional[Any] = None) -> MobilityStepResult:
-        """应用路径动作、推进当前的计划，把移动结果直接写回车辆，并报告这一步
-        车辆状态是否发生了变化、实际用了多长时间——Env 用这个结果决定时钟这一步
-        该走满 time_step，还是只走车辆实际用掉的时间（状态变化意味着车辆提前
-        结束了这段时间预算，比如到达终点/没电，剩下的预算不该被时钟白白吃掉）。
-
-        不看current_time：这一步用到的"路网当前边速度"这类跟时间有关的信息，
-        应该是外部（Env）在调用这里之前先调用过road_network.step(current_time)
-        刷新好的，Mobility自己只管"给定这段时间(time_step)，车辆能走多远"，不
-        需要再关心现在几点，这跟Vehicle.step()不看时间是同一个道理。
-
-        action 目前约定为形如 {"path": [...]} 的字典（单车场景下不再需要按
-        vehicle_id 区分是哪辆车的路径）；没有新路径时传 None 或不含 "path"
-        键即可，会继续推进上一步遗留的计划。
+    def assign_plan(self, path: list[int]) -> None:
+        """接收一个新的出行方案：先reset()清空上一个方案的残留，再算出这条路径的里程碑表。
+        供Env复用同一个MobilityManager时调用（不用每次都new一个新对象）。
         """
-        status_before = self.vehicle.status
+        self.reset()
+        if len(path) < 2:
+            raise ValueError("路径至少要有两个节点（当前节点 + 下一个目标节点）")
+        if self.vehicle.current_node_id != path[0]:
+            raise ValueError(f"路径起点 {path[0]} 与车辆当前位置 {self.vehicle.current_node_id} 不一致")
 
-        if isinstance(action, dict) and "path" in action:
-            self._set_path(action["path"])
+        self.path = list(path)
+        self.milestones = self._build_milestones(self.path)  # 提前把每个节点的累计里程算好
+        self.path_progress = 0.0                              # 从起点出发，目前累计走了0公里
 
-        if self._active_plan is None:
-            # 要么本来就没有计划、要么_set_path()因为"单节点路径=已到终点"这种
-            # 情况直接把状态置成了FINISHED并清空了计划——不管是哪种，这一步都
-            # 没有发生任何"消耗时间的移动"，time_used如实报告成0。
-            return MobilityStepResult(
-                status_changed=self.vehicle.status != status_before,
-                time_used=0.0,
-            )
+    def step(self, time_step: float, available_time: float):
+        """在available_time给出的时间预算内推进车辆移动，时间到了就返回；由上层
+        （Env）拿返回值去更新时钟、刷新环境，需要的话再调用step()接着走。
 
-        result = self._calculate_movement(self.vehicle, self._active_plan, time_step)
+        time_step是仿真的固定时间步长，available_time是"距离下一次时间步骤开始
+        还有多久"（一般小于等于time_step）——用available_time而不是time_step来
+        限制这一步能走多远，是为了让车辆的移动正好卡在环境下一次更新的时间点上，
+        不会在旧的环境状态下走了很久才更新。
 
-        if result.remove_plan:
-            self._active_plan = None
+        返回(finished_flag, time_used)：
+        finished_flag=0：available_time用完了，方案还没走完（自然终止，刚好卡到
+        了下一个环境更新的时间点），time_used就是整个available_time；下次再调用
+        step()会接着这次的断点继续走。
+        finished_flag=1：方案在这一步之内就走到头了（不一定是车辆真正的终点，是
+        不是真终点由上层判断），已经把自己reset()清空；time_used是这一步实际用
+        掉的时间（小于等于available_time），没用完的部分可以被外部当成这一轮还
+        剩下的可用时间去做别的事。
+        """
+        # 移动前先检查有没有方案：没有就说明step()前忘了调用assign_plan()
+        if self.path is None:
+            raise RuntimeError("没有方案，请先调用assign_plan()初始化path等参数，再调用step()")
+
+        total_length_km = self.milestones[-1]  # 整条方案一共要走多少公里
+        remaining_time = available_time        # 这一步还剩多少时间预算没用掉
+        distance_km = 0.0                      # 这一步总共走了多少公里
+        travel_time = 0.0                      # 这一步总共花了多少时间
+        finished_flag = 0                      # 先假设是"预算用完"，方案真走到头了再改成1
+
+        # 一条边一条边地往前走，直到时间预算用完，或者方案走到头
+        while remaining_time > 0:
+            if self.path_progress >= total_length_km:
+                finished_flag = 1
+                break
+
+            # 根据目前累计走了多少公里，查出正在哪一条边上
+            segment_index = self._locate_segment_index()
+            node_from = self.path[segment_index]
+            node_to = self.path[segment_index + 1]
+            edge = self.road_network.get_edge_between(node_from, node_to)
+
+            edge_remaining_km = self.milestones[segment_index + 1] - self.path_progress  # 这条边还剩多少公里没走完
+
+            # 全局时间单位是分钟，把限速(公里/小时)换算成公里/分钟
+            speed_km_per_minute = max(edge["speed_kph"], 1e-6) / 60.0
+
+            # 这一小段能走多远：取"这条边剩多远"和"这些时间能走多远"两者中更小的
+            step_distance = min(edge_remaining_km, speed_km_per_minute * remaining_time)
+            step_time = step_distance / speed_km_per_minute
+
+            distance_km = distance_km + step_distance
+            travel_time = travel_time + step_time
+            remaining_time = remaining_time - step_time
+            self.path_progress = self.path_progress + step_distance
+
+            if step_distance < edge_remaining_km - 1e-9:
+                break  # 这条边没走完，说明这一步的时间预算已经用光了
+            # 否则这条边刚好走完了，继续下一轮循环，用剩下的时间接着走下一条边
+
+        current_node_id, next_node_id, edge_progress_km = self._current_position()
+
+        # 这一步只要真的动了，就报DRIVING；是不是真的到终点，交给上层（Env）判断
+        if distance_km > 0:
+            move_status = VehicleStatus.DRIVING
+        else:
+            move_status = None
 
         self.vehicle.step(
             action="move",
             params={
-                "distance_km": result.distance_km,
-                "travel_time": result.travel_time,
-                "current_node_id": result.current_node_id,
-                "next_node_id": result.next_node_id,
-                "edge_progress_km": result.edge_progress_km,
-                "status": result.status,
+                "distance_km": distance_km,
+                "travel_time": travel_time,
+                "current_node_id": current_node_id,
+                "next_node_id": next_node_id,
+                "edge_progress_km": edge_progress_km,
+                "status": move_status,
             },
         )
 
-        return MobilityStepResult(
-            status_changed=self.vehicle.status != status_before,
-            time_used=result.travel_time,
-        )
-
-    def get_state(self) -> dict[str, Any]:
-        """返回当前路径执行状态。"""
-        return {
-            "has_active_plan": self._active_plan is not None,
-            "active_plan": (
-                None
-                if self._active_plan is None
-                else {
-                    "path": deepcopy(self._active_plan.path),
-                    "next_node_index": self._active_plan.next_node_index,
-                    "current_edge_remaining_km": self._active_plan.current_edge_remaining_km,
-                }
-            ),
-        }
-
-    # ------------------------------------------------------------------
-    # 内部实现（下划线开头，外部代码不应依赖）
-    # ------------------------------------------------------------------
-
-    def _set_path(self, path: list[int]) -> None:
-        if not path:
-            raise ValueError("路径不能为空")
-        if self.vehicle.current_node_id != path[0]:
-            raise ValueError(
-                f"路径起点 {path[0]} 与车辆当前位置 "
-                f"{self.vehicle.current_node_id} 不一致"
-            )
-
-        if len(path) == 1:
-            if path[0] != self.vehicle.destination_node_id:
-                raise ValueError("单节点路径只能用于已经到达终点的车辆")
-
-            self._active_plan = None
-            self.vehicle.step(
-                action="set_status",
-                params={"status": VehicleStatus.FINISHED},
-            )
-            return
-
-        self._active_plan = MobilityPlan(path=list(path))
-
-    def _calculate_movement(
-        self,
-        vehicle: Vehicle,
-        plan: MobilityPlan,
-        time_step: float,
-    ) -> MovementResult:
-        remaining_time = max(float(time_step), 0.0)
-        remaining_energy_distance = vehicle.available_distance_km()
-        result = MovementResult()
-        reached_node_id: Optional[int] = None
-
-        while remaining_time > 0 and self._can_move(vehicle):
-            if plan.next_node_index >= len(plan.path):
-                result.status = VehicleStatus.FINISHED
-                result.remove_plan = True
-                break
-
-            current_node = plan.path[plan.next_node_index - 1]
-            next_node = plan.path[plan.next_node_index]
-            edge = self.road_network.get_edge_between(current_node, next_node)
-
-            if plan.current_edge_remaining_km is None:
-                plan.current_edge_remaining_km = edge["length_km"]
-
-            # 注意：全局时间单位已统一为"分钟"（Env.time_step / RoadNetwork.step()
-            # 的 current_time 都是分钟），所以这里把 speed_kph 换算成"公里/分钟"，
-            # 不能再按旧写法换算成"公里/秒"再乘以 remaining_time——旧写法在
-            # remaining_time 实际传入的是分钟时会把行驶距离放大60倍，这是2026-09-07
-            # 全局改成分钟制时，mid_mobility.py 这份草稿没有同步到的一处遗留问题，
-            # 这次顺手一并修正。
-            speed_km_per_minute = max(edge["speed_kph"], 1e-6) / 60.0
-            travel_distance = min(
-                plan.current_edge_remaining_km,
-                speed_km_per_minute * remaining_time,
-                remaining_energy_distance,
-            )
-
-            if travel_distance <= 0:
-                result.status = VehicleStatus.FAILED
-                result.remove_plan = True
-                break
-
-            travel_time = travel_distance / speed_km_per_minute
-            result.distance_km += travel_distance
-            result.travel_time += travel_time
-            remaining_time -= travel_time
-            remaining_energy_distance -= travel_distance
-            plan.current_edge_remaining_km -= travel_distance
-
-            if remaining_energy_distance <= 1e-9:
-                result.status = VehicleStatus.FAILED
-                result.remove_plan = True
-                break
-
-            if plan.current_edge_remaining_km > 1e-9:
-                break
-
-            reached_node_id = next_node
-            plan.next_node_index += 1
-            plan.current_edge_remaining_km = None
-
-        # 不管这一步是走完了一整条边、只走了半条边、还是完全没动，都从plan当前
-        # 的状态（next_node_index/current_edge_remaining_km）把"现在具体在哪"
-        # 算出来，每次都汇报current_node_id/next_node_id/edge_progress_km，
-        # 不再是"只有到达完整节点才汇报位置"（这是原来代码的一个已知缺口）。
-        if plan.next_node_index < len(plan.path):
-            position_current_node = plan.path[plan.next_node_index - 1]
-            position_next_node = plan.path[plan.next_node_index]
-            edge = self.road_network.get_edge_between(position_current_node, position_next_node)
-            remaining = plan.current_edge_remaining_km
-            edge_progress_km = 0.0 if remaining is None else edge["length_km"] - remaining
-
-            result.current_node_id = position_current_node
-            result.next_node_id = position_next_node
-            result.edge_progress_km = edge_progress_km
+        if finished_flag == 1:
+            time_used = travel_time  # 真实耗时，可能小于available_time
+            self.reset()             # 方案走完了，清空自己，等外部下一次assign_plan()
         else:
-            # 已经到终点：next_node_id故意设成跟current_node_id一样（而不是None），
-            # 是因为move()对"传None"的约定是"这个字段不变"，如果这里传None，
-            # next_node_id会停留在到达终点前那一刻的旧值，变成一个过期数据。
-            # 设成等于current_node_id，直观地表示"不再朝任何地方走"，同时避免
-            # 改动已经定稿过的Vehicle.move()的参数语义。
-            result.current_node_id = plan.path[-1]
-            result.next_node_id = plan.path[-1]
-            result.edge_progress_km = 0.0
+            time_used = available_time  # 预算全部用掉
 
-        if reached_node_id == vehicle.destination_node_id:
-            result.status = VehicleStatus.FINISHED
-            result.remove_plan = True
-        elif result.distance_km > 0 and result.status is None:
-            result.status = VehicleStatus.DRIVING
+        return finished_flag, time_used
 
-        return result
+    def _build_milestones(self, path: list[int]) -> list[float]:
+        """把路径上每段边的长度依次累加：milestones[i]是从path[0]走到path[i]的累计公里数。"""
+        milestones = [0.0]  # 起点(path[0])的累计里程是0
+        for index in range(1, len(path)):
+            edge = self.road_network.get_edge_between(path[index - 1], path[index])
+            milestones.append(milestones[index - 1] + edge["length_km"])
+        return milestones
 
-    @staticmethod
-    def _can_move(vehicle: Vehicle) -> bool:
-        return vehicle.status not in (
-            VehicleStatus.FINISHED,
-            VehicleStatus.FAILED,
-            VehicleStatus.CHARGING,
-            VehicleStatus.QUEUEING,
-        )
+    def _locate_segment_index(self) -> int:
+        """根据path_progress在milestones里查出当前在哪一条边上，返回这条边起点在path里的下标。"""
+        index = bisect_right(self.milestones, self.path_progress) - 1
+        index = max(index, 0)                    # path_progress=0时停在第一条边上
+        index = min(index, len(self.path) - 2)   # 不越界（最后一条边的起点下标是len(path)-2）
+        return index
+
+    def _current_position(self):
+        """算出车辆当前在哪两个节点之间、这条边已经走了多远。"""
+        total_length_km = self.milestones[-1]
+        if self.path_progress >= total_length_km:
+            last_node = self.path[-1]
+            return last_node, last_node, 0.0
+
+        segment_index = self._locate_segment_index()
+        node_from = self.path[segment_index]
+        node_to = self.path[segment_index + 1]
+        edge_progress_km = self.path_progress - self.milestones[segment_index]
+        return node_from, node_to, edge_progress_km

@@ -119,26 +119,30 @@ class EVChargingEnv:
 
     def step(self, action: Optional[Any] = None) -> dict[str, Any]:
         """推进一个时间步。
-
         (1) 车辆移动：mobility 这一步用到的道路速度/站点状态，用的是"最近一次
             环境刷新"留下的结果——可能是 reset() 构造时按 initial_time 刷新的，
             也可能是上一次 step() 结束时按那时的 current_time 刷新的；因为
             current_time 在两次刷新之间不会变，这里不需要再重复刷新一次
             （重复刷新会算出完全一样的结果，纯粹浪费）；
-        (2) 时钟推进：如果车辆状态变了（到达终点/没电/开始行驶……），说明这段
-            time_step 预算被提前用掉了一部分，用 mobility 实际报告的
-            time_used 推进时钟，不把没用到的那部分预算凭空吃掉；状态没变
-            就直接走满 self.time_step；
+        (2) 时钟推进：这一步只要有方案在执行（had_plan=True，不管是延续上次
+            没走完的长方案，还是这次新给的短方案），就用 mobility 实际报告的
+            time_used 推进时钟——它可能刚好等于 time_step（方案比这一步预算
+            长，一整个time_step都在赶路），也可能比 time_step 短（方案提前
+            走完，不管是到达终点还是只是这一小段方案结束）；完全没有方案在
+            跑，才会走满 self.time_step；
         (3) 用推进后的新时间刷新一次环境：一是让这次 step() 返回的观测快照里，
             road_network/stations 跟 current_time 对得上、不会慢半拍；二是
             顺便把这份状态留给下一次 step() 的第(1)步直接用，不用再刷新一遍。
         """
-        # (1) 车辆移动
-        mobility_result = self.mobility.step(time_step=self.time_step, action=action)
+        # (1) 车辆移动：mobility.step() 返回 (had_plan, time_used) 这个纯元组。
+        # 注意这里用的是"这一步有没有方案在执行"，不是"车辆状态变没变"——
+        # 后者在方案是一小段一小段给的场景下（比如RL）会不准，具体原因见
+        # mid_mobility.py 里 step() 的文档字符串。
+        had_plan, time_used = self.mobility.step(time_step=self.time_step, action=action)
 
-        # (2) 时钟推进：按车辆这一步是否发生状态变化，决定走多久
-        if mobility_result.status_changed:
-            self.current_time += mobility_result.time_used
+        # (2) 时钟推进：这一步有方案就走实际用掉的时间，没有方案就走满time_step
+        if had_plan:
+            self.current_time += time_used
         else:
             self.current_time += self.time_step
 
