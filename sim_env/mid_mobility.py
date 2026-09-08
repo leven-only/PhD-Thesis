@@ -44,14 +44,14 @@ class MobilityManager:
         self.milestones = self._build_milestones(self.path)  # 提前把每个节点的累计里程算好
         self.path_progress = 0.0                              # 从起点出发，目前累计走了0公里
 
-    def step(self, time_step: float, available_time: float):
+    def step(self, available_time: float):
         """在available_time给出的时间预算内推进车辆移动，时间到了就返回；由上层
         （Env）拿返回值去更新时钟、刷新环境，需要的话再调用step()接着走。
 
-        time_step是仿真的固定时间步长，available_time是"距离下一次时间步骤开始
-        还有多久"（一般小于等于time_step）——用available_time而不是time_step来
-        限制这一步能走多远，是为了让车辆的移动正好卡在环境下一次更新的时间点上，
-        不会在旧的环境状态下走了很久才更新。
+        available_time是"距离下一次环境更新时间点还有多久"，由上层算好传进来
+        （不一定等于仿真固定的time_step——如果这一路上已经先用掉一部分时间，
+        剩下能走的就会比time_step短）；用它限制这一步能走多远，是为了让车辆的
+        移动正好卡在环境下一次更新的时间点上，不会在旧的环境状态下走了很久才更新。
 
         返回(finished_flag, time_used)：
         finished_flag=0：available_time用完了，方案还没走完（自然终止，刚好卡到
