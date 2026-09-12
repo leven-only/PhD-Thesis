@@ -4,8 +4,8 @@ from bisect import bisect_right
 from copy import deepcopy
 from typing import Optional
 
-from sim_env.base_road_network import RoadNetwork
-from sim_env.base_vehicle import Vehicle
+from _02_sim_env.base_road_network import RoadNetwork
+from _02_sim_env.base_vehicle import Vehicle
 
 
 class MobilityManager:
@@ -44,71 +44,42 @@ class MobilityManager:
         self.milestones = self._build_milestones(self.path)  # 提前把每个节点的累计里程算好
         self.path_progress = 0.0                              # 从起点出发，目前累计走了0公里
 
-    def step(self, available_time: float):
-        """在available_time给出的时间预算内推进车辆移动，时间到了就返回；由上层
-        （Env）拿返回值去更新时钟、刷新环境，需要的话再调用step()接着走。
-
-        available_time是"距离下一次环境更新时间点还有多久"，由上层算好传进来
-        （不一定等于仿真固定的time_step——如果这一路上已经先用掉一部分时间，
-        剩下能走的就会比time_step短）；用它限制这一步能走多远，是为了让车辆的
-        移动正好卡在环境下一次更新的时间点上，不会在旧的环境状态下走了很久才更新。
+    def step(self):
+        """推进车辆走完当前所在的这一条边，到达下一个节点为止——不设时间预算
+        上限，这条边多长就走多久（车辆在路上的时候不看环境变化，所以没必要
+        卡在一个固定的time_step上，只在到达节点这一刻才需要停下来，把控制权
+        交还给上层Env）。
 
         返回(finished_flag, time_used)：
-        finished_flag=0：available_time用完了，方案还没走完（自然终止，刚好卡到
-        了下一个环境更新的时间点），time_used就是整个available_time；下次再调用
-        step()会接着这次的断点继续走。
-        finished_flag=1：方案在这一步之内就走到头了（不一定是车辆真正的终点，是
-        不是真终点由上层判断），已经把自己reset()清空；time_used是这一步实际用
-        掉的时间（小于等于available_time），没用完的部分可以被外部当成这一轮还
-        剩下的可用时间去做别的事。
+        finished_flag=1：这条边刚好是路径的最后一段，走完这一步整条方案就
+        走到头了（不一定是车辆真正的终点，是不是真终点由上层判断），已经把
+        自己reset()清空。
+        finished_flag=0：到了下一个节点，但方案还没走到头，需要外部再调用
+        一次step()才能接着走下一条边。
+        time_used是走这条边实际用掉的时间（分钟）。
         """
         # 移动前先检查有没有方案：没有就说明step()前忘了调用assign_plan()
         if self.path is None:
             raise RuntimeError("没有方案，请先调用assign_plan()初始化path等参数，再调用step()")
 
         total_length_km = self.milestones[-1]  # 整条方案一共要走多少公里
-        remaining_time = available_time        # 这一步还剩多少时间预算没用掉
-        distance_km = 0.0                      # 这一步总共走了多少公里
-        travel_time = 0.0                      # 这一步总共花了多少时间
-        finished_flag = 0                      # 先假设是"预算用完"，方案真走到头了再改成1
 
-        # 一条边一条边地往前走，直到时间预算用完，或者方案走到头
-        while remaining_time > 0:
-            if self.path_progress >= total_length_km:
-                finished_flag = 1
-                break
+        # 根据目前累计走了多少公里，查出正在哪一条边上
+        segment_index = self._locate_segment_index()
+        node_from = self.path[segment_index]
+        node_to = self.path[segment_index + 1]
+        edge = self.road_network.get_edge_between(node_from, node_to)
 
-            # 根据目前累计走了多少公里，查出正在哪一条边上
-            segment_index = self._locate_segment_index()
-            node_from = self.path[segment_index]
-            node_to = self.path[segment_index + 1]
-            edge = self.road_network.get_edge_between(node_from, node_to)
+        distance_km = self.milestones[segment_index + 1] - self.path_progress  # 这条边还剩多少公里，这一步全部走完
 
-            edge_remaining_km = self.milestones[segment_index + 1] - self.path_progress  # 这条边还剩多少公里没走完
+        # 全局时间单位是分钟，把限速(公里/小时)换算成公里/分钟
+        speed_km_per_minute = max(edge["speed_kph"], 1e-6) / 60.0
+        travel_time = distance_km / speed_km_per_minute  # 走完这条边实际用掉的时间
 
-            # 全局时间单位是分钟，把限速(公里/小时)换算成公里/分钟
-            speed_km_per_minute = max(edge["speed_kph"], 1e-6) / 60.0
+        self.path_progress = self.path_progress + distance_km
 
-            # 这一小段能走多远：取"这条边剩多远"和"这些时间能走多远"两者中更小的
-            step_distance = min(edge_remaining_km, speed_km_per_minute * remaining_time)
-            step_time = step_distance / speed_km_per_minute
-
-            distance_km = distance_km + step_distance
-            travel_time = travel_time + step_time
-            remaining_time = remaining_time - step_time
-            self.path_progress = self.path_progress + step_distance
-
-            # 这一步正好把整条路径走完了：不管预算是不是也刚好同时用完，都直接
-            # 结束（不能只靠"下一轮循环开头"才发现走完了——如果这一步恰好把
-            # remaining_time也耗到0，while条件就不成立，不会再进入下一轮循环，
-            # finished_flag就会一直停在0，要等外部再调用一次step()才会被发现）
-            if self.path_progress >= total_length_km - 1e-9:
-                finished_flag = 1
-                break
-
-            if step_distance < edge_remaining_km -  1e-9:
-                break  # 这条边没走完，说明这一步的时间预算已经用光了
-            # 否则这条边刚好走完了，继续下一轮循环，用剩下的时间接着走下一条边
+        # 走完这条边，是不是也刚好把整条路径走到头了
+        finished_flag = 1 if self.path_progress >= total_length_km - 1e-9 else 0
 
         current_node_id, next_node_id, edge_progress_km = self._current_position()
 
@@ -123,11 +94,10 @@ class MobilityManager:
             },
         )
 
+        time_used = travel_time  # 走这条边实际用掉的时间，就是这一步的time_used
+
         if finished_flag == 1:
-            time_used = travel_time  # 真实耗时，可能小于available_time
-            self.reset()             # 方案走完了，清空自己，等外部下一次assign_plan()
-        else:
-            time_used = available_time  # 预算全部用掉
+            self.reset()  # 方案走完了，清空自己，等外部下一次assign_plan()
 
         return finished_flag, time_used
 

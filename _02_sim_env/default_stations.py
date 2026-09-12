@@ -3,9 +3,9 @@
 default_stations_config 可以直接作为 EVChargingEnv 的 stations_config 构造
 参数传入——stations_config 是 StationManager 内部会逐项转成 ChargingStation
 对象的一份"JSON式"配置列表，这里每个字典的 key 名字要跟
-ChargingStation.__init__() 的形参一一对应（见 sim_env/base_station.py）：
+ChargingStation.__init__() 的形参一一对应（见 _02_sim_env/base_station.py）：
 
-    from sim_env.default_stations import default_stations_config
+    from _02_sim_env.default_stations import default_stations_config
     env = EVChargingEnv(
         ...,
         stations_config=default_stations_config,

@@ -14,10 +14,10 @@
 
 from typing import Any, Optional
 
-from sim_env.base_road_network import RoadNetwork
-from sim_env.base_station import StationManager, ChargingStation
-from sim_env.base_vehicle import Vehicle
-from sim_env.mid_mobility import MobilityManager
+from _02_sim_env.base_road_network import RoadNetwork
+from _02_sim_env.base_station import StationManager, ChargingStation
+from _02_sim_env.base_vehicle import Vehicle
+from _02_sim_env.mid_mobility import MobilityManager
 
 
 class EVChargingEnv:
@@ -118,6 +118,18 @@ class EVChargingEnv:
         return self.get_state()
 
     def step(self, action: Optional[Any] = None) -> dict[str, Any]:
+        """推进仿真一次：只负责"接收算法发来的行动，推进一次调度"，不负责
+        算法什么时候该发新行动——那是算法侧 interaction() 的职责（见
+        _03_algorithms/base_algorithm.py）。
+
+        车辆沿着当前方案走完一条边、到达下一个节点为止，就刷新一次环境状态
+        然后返回；不会像以前那样在内部用while循环一次走完整条路径。调用方
+        要自己反复调用 step()，直到方案走完/车辆到达终点。
+
+        action 只负责"下发新行动"：带 "path" 表示下发一个新的移动方案（只有
+        在当前没有方案在跑时才允许，否则报错）；action 是 None（或者不带
+        "path"）表示"沿着已经在跑的方案继续走一条边"，不下发新方案。
+        """
         # (1) 有新方案就先下发：action里带"path"就是下发移动方案；不带"path"的
         # 分支现在先原样留空(pass)，将来是下发充电方案的地方(比如action里带
         # 类似charging_station_id这样的字段)。
@@ -125,7 +137,7 @@ class EVChargingEnv:
             if self.mobility.path is not None:
                 raise RuntimeError(
                     "当前还有方案没走完(mobility.path不是None)，不能再下发新方案；"
-                    "要等上一次step()返回之后（此时方案必定已经走完），再传新的path。"
+                    "要等方案走完(has_active_plan()返回False)之后，再传新的path。"
                 )
             self.mobility.assign_plan(action["path"])
         else:
@@ -134,32 +146,23 @@ class EVChargingEnv:
         has_mobility_plan = self.mobility.path is not None
         has_charging_plan = False  # 充电还没实现，先占位；接入mid_charging.py后换成真正的判断
 
-        # (2)+(3) mobility和charging互斥，各自独立地逐tick推进到自己的方案走完为止
+        # (2) mobility负责把当前方案往前推进一条边（走到下一个节点为止），
+        # 不设时间预算上限——车辆在路上的时候不看环境变化，所以"这条边要走
+        # 多久"不用被time_step卡住，走完这条边有多长时间就用多长时间。
         if has_mobility_plan:
-            while True:
-                # 这一tick能用多少时间：不超过"距离下一个tick边界"这段时间
-                elapsed_in_tick = (self.current_time - self._initial_time) % self.time_step
-                available_time = self.time_step - elapsed_in_tick
+            finished_flag, time_used = self.mobility.step()
 
-                finished_flag, time_used = self.mobility.step(available_time=available_time)
+            self.current_time += time_used
 
-                self.current_time += time_used
-
-                # 用推进后的新时间刷新环境：下一轮循环、以及方案走完后的返回值都要用最新状态
-                self.road_network.step(self.current_time)
-                self.station_manager.step(
-                    current_time=self.current_time,
-                    tou_tariff=self.tou_tariff,
-                )
-
-                if finished_flag == 1:
-                    break  # 这次下发的移动方案已经走完，结束循环，返回
+            # 用推进后的新时间刷新环境：到达节点这一刻的最新状态
+            self.road_network.step(self.current_time)
+            self.station_manager.step(
+                current_time=self.current_time,
+                tou_tariff=self.tou_tariff,
+            )
 
         elif has_charging_plan:
-            # 充电逻辑，稍后实现。结构上应该跟mobility分支对称：自己的while循环，
-            # 每一轮算available_time -> 调用充电模块的step()拿到(finished_flag,
-            # time_used) -> self.current_time += time_used -> 刷新环境 ->
-            # finished_flag==1就break。现在还没有充电模块，先占位。
+            # 充电逻辑，稍后实现。现在还没有充电模块，先占位。
             pass
         else:
             raise RuntimeError(
@@ -168,6 +171,13 @@ class EVChargingEnv:
             )
 
         return self.get_state()
+
+    def has_active_plan(self) -> bool:
+        """查询当前有没有还没走完的移动方案。没有方案时(刚构造/刚reset()/
+        上一个方案刚走完)，算法侧要先自己决策一次，再把新方案传给step()；
+        interaction()就是靠这个函数判断"该继续走，还是该重新决策"。
+        """
+        return self.mobility.path is not None
 
     def get_state(self) -> dict[str, Any]:
         """返回当前状态。暂时先把三个组件各自的 get_state() 结果原样汇总返回，
