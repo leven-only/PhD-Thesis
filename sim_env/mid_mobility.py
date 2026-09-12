@@ -106,7 +106,7 @@ class MobilityManager:
                 finished_flag = 1
                 break
 
-            if step_distance < edge_remaining_km - 1e-9:
+            if step_distance < edge_remaining_km -  1e-9:
                 break  # 这条边没走完，说明这一步的时间预算已经用光了
             # 否则这条边刚好走完了，继续下一轮循环，用剩下的时间接着走下一条边
 
