@@ -118,39 +118,6 @@ class EVChargingEnv:
         return self.get_state()
 
     def step(self, action: Optional[Any] = None) -> dict[str, Any]:
-        """推进一次调用：把当前下发的方案（移动或充电）一路推进到"方案结束"为止才返回，
-        中途逐tick刷新环境，调用方不需要自己写while循环。
-
-        (1) 有新方案就先下发：action里带"path"时，只有在当前没有方案在跑
-            （mobility.path是None）时才允许下发新方案。如果上一个方案还没
-            走完就传新的path，说明上层没有按规矩来——正确用法是：等上一次
-            step()返回（此时方案必定已经走完）之后再传新path。
-            以后接入充电后：车辆任意时刻要么在移动（mobility方案在跑），要么
-            在充电（充电方案在跑），两者互斥、但必须有一个在跑，不能同时都没有。
-
-        (2)+(3) mobility和charging各自负责把自己的方案逐tick推进到走完为止：
-            两者是互斥的（同一时刻只会走其中一个分支），所以各自拥有一个独立
-            的while循环，不共用同一个循环，也不共用同一次current_time推进：
-            每一轮循环都是：
-                - 先算出这一tick能用多少时间(available_time)，不超过"距离下一个
-                  tick边界"这段时间：
-                      elapsed_in_tick = current_time在当前这一tick里已经过了多久
-                      available_time = time_step - elapsed_in_tick
-                - 调用对应模块的step()推进这一tick，拿到(finished_flag, time_used)
-                - self.current_time += time_used，然后用推进后的新时间刷新一次
-                  环境（road_network/station_manager），让下一轮循环、以及方案
-                  走完后返回的观测快照都跟当前时间对得上
-                - finished_flag==1（方案走完了）就跳出这个分支自己的循环；否则
-                  回到循环开头，用新的可用时间接着走下一个tick
-
-            这样设计是为了同时适配两类算法：一次性算法（比如Dijkstra，一次给出
-            很长的完整路径，算的时候不看环境实时变化，所以让它在一次step()调用
-            里就跑到底、内部逐tick刷新环境即可）和学习式算法（比如RL，本来就是
-            一次只给两个节点的短方案，一次step()调用很快就能跑完，跑完之后再看
-            环境、算下一步，效果上跟"一步一环境反馈"是一样的）。
-
-            两个方案都没有：不符合业务规则，直接报错（不能空转/什么都不做）。
-        """
         # (1) 有新方案就先下发：action里带"path"就是下发移动方案；不带"path"的
         # 分支现在先原样留空(pass)，将来是下发充电方案的地方(比如action里带
         # 类似charging_station_id这样的字段)。
